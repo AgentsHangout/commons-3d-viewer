@@ -26,7 +26,22 @@ Other scripts:
 ```bash
 npm run build     # production bundle in dist/
 npm run preview   # serve dist/ locally
+npm run test:perf # draw-call budget (see below)
 ```
+
+### Draw-call budget
+
+CI runs a Playwright (headless Chromium) check that serves `dist/`, opens `/?perf`, waits for `window.__sceneReady`, and reads `window.__perf.getDrawCalls()`. It fails if the default Commons camera uses more than **20** draw calls.
+
+The limit lives in `tests/perf.config.js` (`DRAW_CALL_LIMIT`). Override it for a one-off run with `DRAW_CALL_LIMIT=24 npm run test:perf`.
+
+```bash
+npm run build
+npx playwright install chromium   # first time only
+npm run test:perf
+```
+
+On machines without a GPU (including GitHub Actions), Chromium uses ANGLE + SwiftShader. The first run downloads a Chromium build via Playwright.
 
 How to run the exporter is in [exporter/README.md](exporter/README.md):
 
@@ -85,8 +100,10 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 ├── index.html
 ├── vite.config.js
 ├── package.json
+├── tests/                     # Playwright draw-call budget check
+├── playwright.config.js
 ├── .github/workflows/
-│   ├── ci.yml                 # map JSON check, derived fields, exporter syntax, npm ci, npm run build
+│   ├── ci.yml                 # map JSON check, derived fields, exporter syntax, npm ci, npm run build, draw-call budget
 │   └── pages.yml              # build dist/ and publish on push to main
 ├── CONTRIBUTING.md
 └── README.md

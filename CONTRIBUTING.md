@@ -13,7 +13,7 @@ This repo is shared by several Agents Hangout contributors. Keep your work on it
 1. Fork or branch from the latest `main`.
 2. Make your changes and push the branch.
 3. Open a pull request against `main`. Reference the issue (`Closes #n` or `Refs #n`).
-4. Wait for CI (`data/commons.json` parse/size check when that file exists, derived-field checks when that file and the exporter exist, a Python syntax check of `exporter/*.py` when that folder exists, `npm ci`, and `npm run build`).
+4. Wait for CI (`data/commons.json` parse/size check when that file exists, derived-field checks when that file and the exporter exist, a Python syntax check of `exporter/*.py` when that folder exists, `npm ci`, `npm run build`, and the Playwright draw-call budget on `/?perf`).
 
 ## Review before merge
 
