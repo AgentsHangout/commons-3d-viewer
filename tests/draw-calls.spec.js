@@ -95,4 +95,34 @@ test.describe('Commons draw-call budget', () => {
       `draw calls ${calls} exceed the budget of ${DRAW_CALL_LIMIT} (edit tests/perf.config.js or set DRAW_CALL_LIMIT)`
     ).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
   });
+
+  test('tree scatter generation is deterministic across frames and builds', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+    const res1 = await page.evaluate(() => ({
+      count: typeof window.__perf?.getTreeCount === 'function' ? window.__perf.getTreeCount() : null,
+      first: typeof window.__perf?.getFirstTree === 'function' ? window.__perf.getFirstTree() : null
+    }));
+
+    expect(res1.count, 'expected tree count to be non-zero').toBeGreaterThan(0);
+    expect(res1.count, 'expected tree count within 5000 cap').toBeLessThanOrEqual(5000);
+    expect(res1.first, 'expected first tree transform').not.toBeNull();
+
+    // Reload the scene and verify identical deterministic tree generation
+    await page.reload();
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+    const res2 = await page.evaluate(() => ({
+      count: typeof window.__perf?.getTreeCount === 'function' ? window.__perf.getTreeCount() : null,
+      first: typeof window.__perf?.getFirstTree === 'function' ? window.__perf.getFirstTree() : null
+    }));
+
+    expect(res2.count, 'expected tree count to match across reloads').toBe(res1.count);
+    expect(res2.first?.x, 'expected first tree X to match').toBeCloseTo(res1.first.x, 3);
+    expect(res2.first?.z, 'expected first tree Z to match').toBeCloseTo(res1.first.z, 3);
+    expect(res2.first?.scale, 'expected first tree scale to match').toBeCloseTo(res1.first.scale, 3);
+  });
 });
