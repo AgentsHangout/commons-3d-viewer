@@ -228,4 +228,133 @@ test.describe('Commons draw-call budget', () => {
     expect(report.road45_23).toBeCloseTo(0.00, 3);
     expect(report.vertex46_23_y).toBeCloseTo(0.00, 3);
   });
+  test('tri-stream primitive consolidation, double-sided materials, glass transparency, and per-material classification satisfy Section 17', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+
+    const report = await page.evaluate(() => {
+      if (!window.__perf || typeof window.__perf.getLoadedModels !== 'function') return null;
+      const loaded = window.__perf.getLoadedModels();
+      const keys = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+
+      const modelsInfo = {};
+      for (const key of keys) {
+        const group = loaded[key];
+        if (!group) continue;
+        const meshes = [];
+        group.traverse((c) => {
+          if (c.isMesh) {
+            meshes.push({
+              name: c.name,
+              transparent: c.material.transparent,
+              opacity: c.material.opacity,
+              side: c.material.side,
+              shadowSide: c.material.shadowSide,
+              roughness: c.material.roughness,
+              metalness: c.material.metalness,
+              depthWrite: c.material.depthWrite
+            });
+          }
+        });
+        modelsInfo[key] = meshes;
+      }
+
+      return {
+        modelsInfo,
+        materialClassifications: typeof window.__perf.getMaterialClassifications === 'function' ? window.__perf.getMaterialClassifications() : null,
+        calls: window.__perf.getDrawCalls()
+      };
+    });
+
+    expect(report, 'perf inspection unavailable').not.toBeNull();
+    const { modelsInfo, materialClassifications, calls } = report;
+
+    // 1. Closed Polyhedra FrontSide Assertion (vision's review requirement)
+    const closedSolidModels = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+    for (const key of closedSolidModels) {
+      const frontMesh = modelsInfo[key].find(m => !m.transparent && m.side === 0);
+      expect(frontMesh, `model ${key} must contain a closed solid FrontSide mesh (side: 0)`).toBeDefined();
+      expect(frontMesh.shadowSide, `frontMesh in ${key} must have FrontSide shadowSide`).toBe(0);
+    }
+
+    // 2. Thin Geometry DoubleSide Assertion
+    const thinGeometryModels = ['tree', 'cabin', 'studio', 'workshop'];
+    for (const key of thinGeometryModels) {
+      const doubleMesh = modelsInfo[key].find(m => !m.transparent && m.side === 2);
+      expect(doubleMesh, `model ${key} must contain a thin geometry DoubleSide mesh (side: 2)`).toBeDefined();
+      expect(doubleMesh.shadowSide, `doubleMesh in ${key} must have DoubleSide shadowSide`).toBe(2);
+    }
+
+    // 3. Transparent Glass Stream Assertion
+    for (const key of ['studio', 'workshop']) {
+      const glassMesh = modelsInfo[key].find(m => m.transparent);
+      expect(glassMesh, `model ${key} must contain a transparent glass mesh`).toBeDefined();
+      expect(glassMesh.side).toBe(2);
+      expect(glassMesh.depthWrite).toBe(false);
+    }
+
+    // 4. Strict Per-Material Stream Assertions (Section 17.5 / vision's review ask)
+    const EXPECTED_MATERIAL_STREAMS = {
+      // Pine Tree
+      'Pine_Bark': { side: 0, transparent: false },
+      'Pine_Needles_Deep': { side: 2, transparent: false },
+      'Pine_Needles_Light': { side: 2, transparent: false },
+      // Cabin
+      'Cabin_Stone_Dark': { side: 0, transparent: false },
+      'Cabin_Stone_Masonry': { side: 0, transparent: false },
+      'Cabin_Log_Dark': { side: 0, transparent: false },
+      'Cabin_Log_Light': { side: 0, transparent: false },
+      'Cabin_Iron_Hardware': { side: 0, transparent: false },
+      'Cabin_Gold_Brass': { side: 0, transparent: false },
+      'Cabin_Flue_Terracotta': { side: 0, transparent: false },
+      'Cabin_Window_Glow': { side: 0, transparent: false },
+      'Cabin_Roof_Cedar': { side: 2, transparent: false },
+      'Cabin_Trim_Dark': { side: 2, transparent: false },
+      // Studio
+      'Studio_Concrete': { side: 0, transparent: false },
+      'Studio_BlackSteel': { side: 0, transparent: false },
+      'Studio_Wood_Oak': { side: 0, transparent: false },
+      'Studio_Wood_Walnut': { side: 0, transparent: false },
+      'Studio_Lamp_Glow': { side: 0, transparent: false },
+      'Studio_Roof_Dark': { side: 2, transparent: false },
+      'Studio_Foliage': { side: 2, transparent: false },
+      'Studio_Glass': { side: 2, transparent: true },
+      // Workshop
+      'Workshop_Brick_Dark': { side: 0, transparent: false },
+      'Workshop_Brick_Red': { side: 0, transparent: false },
+      'Workshop_Steel_Dark': { side: 0, transparent: false },
+      'Workshop_Concrete': { side: 0, transparent: false },
+      'Workshop_Lamp_Glow': { side: 0, transparent: false },
+      'Workshop_Roof_Corrugated': { side: 2, transparent: false },
+      'Workshop_Window_Glass': { side: 2, transparent: true },
+      // Road Kit
+      'Mat_Road_Asphalt': { side: 0, transparent: false },
+      'Mat_Road_Curb': { side: 0, transparent: false },
+      'Mat_Road_Bumper': { side: 0, transparent: false },
+      'Mat_Road_Marking': { side: 0, transparent: false }
+    };
+
+    expect(materialClassifications, 'expected material classifications report').not.toBeNull();
+    for (const [matName, expected] of Object.entries(EXPECTED_MATERIAL_STREAMS)) {
+      const actual = materialClassifications[matName];
+      expect(actual, `expected material ${matName} to be classified in scene`).toBeDefined();
+      expect(actual.side, `material ${matName} side mismatch`).toBe(expected.side);
+      expect(actual.transparent, `material ${matName} transparency mismatch`).toBe(expected.transparent);
+    }
+
+    // 5. PBR Road Parameter Verification
+    const roadKeys = ['road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+    const straightRoughness = modelsInfo['road_straight'][0].roughness;
+    for (const rKey of roadKeys) {
+      const roadMesh = modelsInfo[rKey][0];
+      expect(roadMesh.roughness).toBeCloseTo(0.75, 2);
+      expect(roadMesh.metalness).toBeCloseTo(0.05, 2);
+      expect(Math.abs(roadMesh.roughness - straightRoughness)).toBeLessThanOrEqual(0.05);
+    }
+
+    // 6. Draw-Call Ceiling Check (nominal 18, strictly <= 20)
+    expect(calls).toBeLessThanOrEqual(20);
+  });
 });

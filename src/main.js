@@ -129,9 +129,12 @@ const loadedModels = {};
  * Collapsing to 1 geometry & 1 material allows rendering via a single THREE.InstancedMesh
  * (1 draw call per model type), well under the strict CI budget.
  */
-function collapseGltfToSingleMesh(gltfScene) {
+function collapseGltfToSingleMesh(gltfScene, key = '') {
   gltfScene.updateMatrixWorld(true);
-  const parts = [];
+  const frontParts = [];
+  const doubleParts = [];
+  const glassParts = [];
+  const matClassifications = {};
 
   let totalVerts = 0;
   let totalRoughness = 0;
@@ -139,34 +142,81 @@ function collapseGltfToSingleMesh(gltfScene) {
   let primaryTexture = null;
   let anyHasUV = false;
 
-  // First pass: inspect attributes across primitives
+  // 1. First pass: inspect UV attributes
   gltfScene.traverse((child) => {
     if (!child.isMesh || !child.geometry) return;
-    if (child.geometry.attributes.uv) {
-      anyHasUV = true;
-    }
+    if (child.geometry.attributes.uv) anyHasUV = true;
   });
 
-  // Second pass: clone, transform, bake vertex colors, and collect
+  // Helper: detect if a mesh/material is transparent glass
+  // In production GLTFs, this matches:
+  // - Studio: 'Studio_Glass'
+  // - Workshop: 'Workshop_Window_Glass'
+  const isGlassPrimitive = (mat, name) => {
+    if (!mat) return false;
+    const n = (mat.name || '').toLowerCase();
+    const cn = (name || '').toLowerCase();
+    if (n.includes('glow') || n.includes('lamp') || cn.includes('glow') || cn.includes('lamp')) return false;
+    if (mat.alphaMode === 'BLEND') return true;
+    if (typeof mat.opacity === 'number' && mat.opacity < 0.95) return true;
+    return n === 'studio_glass' || n === 'workshop_window_glass' || cn === 'studio_glass' || cn === 'workshop_window_glass';
+  };
+
+  // Helper: detect if a primitive is thin open geometry requiring DoubleSide
+  const isExplicitDoubleSided = (mat, meshName) => {
+    if (!mat) return false;
+    // If authoring explicitly disabled doubleSided, strictly respect FrontSide!
+    if (mat.doubleSided === false || mat.side === THREE.FrontSide) return false;
+
+    const m = (mat.name || '').toLowerCase();
+    const n = (meshName || '').toLowerCase();
+
+    // Thin open foliage shells
+    if (m.includes('needles') || n.includes('needle') || n.includes('tier')) return true;
+    // Thin roof eaves and shingles
+    if (m.includes('roof_cedar') || n.includes('shingle')) return true;
+    // Corrugated roof sheet overhangs
+    if (m.includes('roof_corrugated')) return true;
+    // Thin steel canopy overhangs and succulent foliage
+    if ((m.includes('roof_dark') && n.includes('roof')) || m.includes('foliage') || n.includes('succulent')) return true;
+    // Porch brackets, fascia, rails, and trim
+    if (m.includes('trim_dark')) return true;
+
+    // Closed polyhedra (logs, stone, brick, foundations, road slabs) default to FrontSide!
+    return false;
+  };
+
+  // 2. Second pass: partition into front, double, vs glass
   gltfScene.traverse((child) => {
     if (!child.isMesh || !child.geometry) return;
     const mat = Array.isArray(child.material) ? child.material[0] : child.material;
+    const isGlass = isGlassPrimitive(mat, child.name);
+    const isDoubleSided = !isGlass && isExplicitDoubleSided(mat, child.name);
+
+    if (mat && mat.name) {
+      matClassifications[mat.name] = {
+        side: isGlass ? THREE.DoubleSide : (isDoubleSided ? THREE.DoubleSide : THREE.FrontSide),
+        transparent: isGlass,
+        depthWrite: !isGlass
+      };
+    }
+
     const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
     const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;
     const metalness = (mat && typeof mat.metalness === 'number') ? mat.metalness : 0.05;
 
-    if (mat && mat.map && !primaryTexture) {
-      primaryTexture = mat.map;
-    }
+    if (mat && mat.map && !primaryTexture && !isGlass) primaryTexture = mat.map;
 
     let geo = child.geometry.clone();
     if (geo.index) geo = geo.toNonIndexed();
     geo.applyMatrix4(child.matrixWorld);
 
     const count = geo.attributes.position.count;
-    totalVerts += count;
-    totalRoughness += roughness * count;
-    totalMetalness += metalness * count;
+    if (!isGlass) {
+      totalVerts += count;
+      totalRoughness += roughness * count;
+      totalMetalness += metalness * count;
+    }
 
     const colorArr = new Float32Array(count * 3);
     const hasExistingColor = !!geo.attributes.color;
@@ -199,54 +249,117 @@ function collapseGltfToSingleMesh(gltfScene) {
     }
 
     slim.setAttribute('color', new THREE.Float32BufferAttribute(colorArr, 3));
-    parts.push(slim);
+    if (isGlass) {
+      glassParts.push(slim);
+    } else if (isDoubleSided) {
+      doubleParts.push(slim);
+    } else {
+      frontParts.push(slim);
+    }
   });
 
-  if (parts.length === 0) return gltfScene;
+  if (frontParts.length === 0 && doubleParts.length === 0 && glassParts.length === 0) {
+    return gltfScene;
+  }
 
-  const merged = mergeGeometries(parts, false);
-  if (!merged) return gltfScene;
+  const mergedFront = frontParts.length > 0 ? mergeGeometries(frontParts, false) : null;
+  const mergedDouble = doubleParts.length > 0 ? mergeGeometries(doubleParts, false) : null;
+  const mergedGlass = glassParts.length > 0 ? mergeGeometries(glassParts, false) : null;
 
-  // Geometric grounding: normalize model base to sit flush at Y = 0 on top of the terrain plinth
-  merged.computeBoundingBox();
-  const minY = merged.boundingBox ? merged.boundingBox.min.y : 0;
+  // Unified geometric grounding: compute combined minY across all parts
+  let minY = Infinity;
+  for (const g of [mergedFront, mergedDouble, mergedGlass]) {
+    if (g) {
+      g.computeBoundingBox();
+      if (g.boundingBox) minY = Math.min(minY, g.boundingBox.min.y);
+    }
+  }
+  if (!Number.isFinite(minY)) minY = 0;
+
   if (Math.abs(minY) > 0.001) {
-    merged.translate(0, -minY, 0);
-  }
-  merged.computeBoundingBox();
-  merged.computeBoundingSphere();
-
-  if (!merged.attributes.normal) merged.computeVertexNormals();
-
-  const avgRoughness = totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75;
-  const avgMetalness = totalVerts > 0 ? (totalMetalness / totalVerts) : 0.05;
-
-  const matConfig = {
-    vertexColors: true,
-    roughness: avgRoughness,
-    metalness: avgMetalness,
-    side: THREE.FrontSide
-  };
-  if (primaryTexture) {
-    matConfig.map = primaryTexture;
+    if (mergedFront) mergedFront.translate(0, -minY, 0);
+    if (mergedDouble) mergedDouble.translate(0, -minY, 0);
+    if (mergedGlass) mergedGlass.translate(0, -minY, 0);
   }
 
-  const mesh = new THREE.Mesh(
-    merged,
-    new THREE.MeshStandardMaterial(matConfig)
-  );
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
+  for (const g of [mergedFront, mergedDouble, mergedGlass]) {
+    if (g) {
+      g.computeBoundingBox();
+      g.computeBoundingSphere();
+      if (!g.attributes.normal) g.computeVertexNormals();
+    }
+  }
 
   const group = new THREE.Group();
-  group.add(mesh);
+
+  const isRoad = (key && key.startsWith('road')) ||
+    (gltfScene.name && gltfScene.name.toLowerCase().includes('road'));
+  const avgRoughness = isRoad ? 0.75 : (totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75);
+  const avgMetalness = isRoad ? 0.05 : (totalVerts > 0 ? (totalMetalness / totalVerts) : 0.05);
+
+  // 1. Opaque FrontSide mesh (if any)
+  if (mergedFront) {
+    const frontMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: avgRoughness,
+      metalness: avgMetalness,
+      side: THREE.FrontSide,
+      shadowSide: THREE.FrontSide,
+      transparent: false,
+      depthWrite: true
+    });
+    if (primaryTexture) frontMat.map = primaryTexture;
+
+    const frontMesh = new THREE.Mesh(mergedFront, frontMat);
+    frontMesh.castShadow = true;
+    frontMesh.receiveShadow = true;
+    group.add(frontMesh);
+  }
+
+  // 2. Opaque DoubleSide mesh (if any)
+  if (mergedDouble) {
+    const doubleMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: avgRoughness,
+      metalness: avgMetalness,
+      side: THREE.DoubleSide,
+      shadowSide: THREE.DoubleSide,
+      transparent: false,
+      depthWrite: true
+    });
+    if (primaryTexture) doubleMat.map = primaryTexture;
+
+    const doubleMesh = new THREE.Mesh(mergedDouble, doubleMat);
+    doubleMesh.castShadow = true;
+    doubleMesh.receiveShadow = true;
+    group.add(doubleMesh);
+  }
+
+  // 3. Glass mesh (if any)
+  if (mergedGlass) {
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0.85, 0.92, 0.98),
+      transparent: true,
+      opacity: 0.35,
+      roughness: 0.05,
+      metalness: 0.10,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const glassMesh = new THREE.Mesh(mergedGlass, glassMat);
+    glassMesh.castShadow = false;
+    glassMesh.receiveShadow = true;
+    group.add(glassMesh);
+  }
+
+  group.userData.materialClassifications = matClassifications;
   return group;
 }
 
 async function loadGlbModel(key, url) {
   try {
     const gltf = await gltfLoader.loadAsync(url);
-    loadedModels[key] = collapseGltfToSingleMesh(gltf.scene);
+    loadedModels[key] = collapseGltfToSingleMesh(gltf.scene, key);
     console.log(`[GLTF] Successfully loaded and consolidated ${key}`);
   } catch (err) {
     console.warn(`[GLTF] Could not load model ${key} from ${url}`, err);
@@ -280,7 +393,7 @@ function createInstancedFromGltf(gltfScene, transformsList, options = {}) {
     if (!child.isMesh) return;
     const iMesh = new THREE.InstancedMesh(child.geometry, child.material, transformsList.length);
     iMesh.receiveShadow = receiveShadow;
-    iMesh.castShadow = castShadow;
+    iMesh.castShadow = (child.material && child.material.transparent) ? false : castShadow;
 
     const dummy = new THREE.Object3D();
     transformsList.forEach((t, i) => {
@@ -916,7 +1029,22 @@ function buildWorld(data) {
       getTerrainMesh: () => terrainMesh,
       getRoadTransforms: () => roadTransforms,
       getRoadElevation: (x, y) => roadElevationGrid[y] ? roadElevationGrid[y][x] : undefined,
-      getRoadItems: () => roadItems
+      getRoadItems: () => roadItems,
+      getLoadedModels: () => loadedModels,
+      getMaterialClassifications: () => {
+        const result = {};
+        for (const k in loadedModels) {
+          if (loadedModels[k] && loadedModels[k].userData && loadedModels[k].userData.materialClassifications) {
+            Object.assign(result, loadedModels[k].userData.materialClassifications);
+          }
+        }
+        return result;
+      },
+      setCameraView: (cam, target) => {
+        camera.position.set(cam.x, cam.y, cam.z);
+        controls.target.set(target.x, target.y, target.z);
+        controls.update();
+      }
     };
   }
 }
