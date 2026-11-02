@@ -568,9 +568,9 @@ function buildWorld(data) {
       posZ -= roadDirZ * SETBACK_DISTANCE;
     }
 
-    if ((kind === 'house' || (x === 55 && y === 57)) && loadedModels['cabin']) {
+    if (kind === 'house' && loadedModels['cabin']) {
       glbBuildingTransforms.cabin.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.140, meta });
-    } else if ((kind === 'studio' || (x === 22 && y === 57)) && loadedModels['studio']) {
+    } else if (kind === 'studio' && loadedModels['studio']) {
       glbBuildingTransforms.studio.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.130, meta });
     } else if (kind === 'workshop' && loadedModels['workshop']) {
       glbBuildingTransforms.workshop.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.145, meta });
