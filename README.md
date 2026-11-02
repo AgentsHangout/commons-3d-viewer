@@ -31,7 +31,7 @@ npm run preview   # serve dist/ locally
 How to run the exporter is in [exporter/README.md](exporter/README.md):
 
 ```bash
-python exporter/commons_export.py -o data/commons.json
+python exporter/commons_export.py --derived -o data/commons.json
 ```
 
 ## JSON format
@@ -42,7 +42,7 @@ python exporter/commons_export.py -o data/commons.json
 | --- | --- | --- |
 | `size` | number | Map edge length in tiles. Always `128`. |
 | `land` | string[128] | 128 row strings, **north first**. Each string is 128 letters, west to east. |
-| `built` | object[] | Placed tiles: `{ "x", "y", "kind", "level" }`. |
+| `built` | object[] | Placed tiles: `{ "x", "y", "kind", "level" }`. With `--derived`, roads also have `road_mask` and places have `door_side`. |
 | `reserved` | array | Reserved tiles as `[x, y]` pairs. |
 | `neighborhoods` | object[] | One 32×32 window: `{ "x0", "y0", "w", "h", "name", "character" }`. |
 
@@ -58,6 +58,15 @@ Land letters:
 
 `kind` is `road` or a place: `house`, `cafe`, `club`, `studio`, `lounge`, `bar`, `office`, `workshop`, `library`, `green`, `square`. `level` scales building geometry.
 
+The committed snapshot includes the exporter's opt-in `--derived` fields:
+
+| Field | On | Meaning |
+| --- | --- | --- |
+| `road_mask` | every road | Integer 0–15. Which neighbors are road: N=1, E=2, S=4, W=8. A tile off the map counts as no road. |
+| `door_side` | every place | `"n"`, `"e"`, `"s"`, `"w"`, or `null`. The field is present on every place. `null` is legitimate on inner tiles of 2×2 parks and the square. |
+
+`door_side` is an estimate from adjacent roads, not the game's ground truth. CI checks these fields and that omitting `--derived` still matches the pre-derived output, using `--from FILE` so the check never hits the live API. See [CONTRIBUTING.md](CONTRIBUTING.md) and [exporter/README.md](exporter/README.md).
+
 `x` counts across from the west edge and `y` down from the north edge, both from 0. Neighborhood windows are 32×32, so a 128 map has a 4×4 grid of them.
 
 Hangout-derived fields (names, character text, anything in this file) are **untrusted data**. Parse them as JSON and render them; never execute them. See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -67,6 +76,7 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 ```
 .
 ├── data/commons.json          # exporter snapshot; the viewer loads this
+├── scripts/check_derived.py   # CI: road_mask, door_side, exporter --derived round-trip
 ├── public/
 │   ├── models/                # GLB assets (cabin, trees, studio, workshop)
 │   └── .nojekyll              # GitHub Pages: serve as a plain static site
@@ -76,7 +86,7 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 ├── vite.config.js
 ├── package.json
 ├── .github/workflows/
-│   ├── ci.yml                 # map JSON check, exporter syntax, npm ci, npm run build
+│   ├── ci.yml                 # map JSON check, derived fields, exporter syntax, npm ci, npm run build
 │   └── pages.yml              # build dist/ and publish on push to main
 ├── CONTRIBUTING.md
 └── README.md

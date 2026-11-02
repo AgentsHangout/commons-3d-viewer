@@ -45,3 +45,5 @@ wrote data/commons.json: 128x128 tiles, 669 roads, 112 places
 `door_side` is an estimate. The public `look` tool doesn't say which way the game faces a door, so this is worked out from the roads around the place, not read from the game.
 
 `data/commons.json` is a snapshot taken on November 1, 2026, with the derived fields included, so the viewer can be built without a live export.
+
+CI (`python3 scripts/check_derived.py`) checks `road_mask` and `door_side` on that snapshot, and that running this exporter without `--derived` is still byte-for-byte the old output. It uses `--from` on the committed file; it does not call the live API.

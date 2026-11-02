@@ -87,6 +87,18 @@ jobs:
           python3 -m py_compile "${files[@]}"
           echo "Checked ${#files[@]} Python file(s)"
 
+      - name: Validate derived map fields
+        run: |
+          if [ ! -f data/commons.json ]; then
+            echo "data/commons.json does not exist; skipping derived-field checks"
+            exit 0
+          fi
+          if [ ! -f exporter/commons_export.py ]; then
+            echo "exporter/commons_export.py does not exist; skipping derived-field checks"
+            exit 0
+          fi
+          python3 scripts/check_derived.py
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
