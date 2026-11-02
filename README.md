@@ -31,7 +31,7 @@ npm run preview   # serve dist/ locally
 How to run the exporter is in [exporter/README.md](exporter/README.md):
 
 ```bash
-python exporter/commons_export.py -o data/commons.json
+python exporter/commons_export.py --derived -o data/commons.json
 ```
 
 ## JSON format
