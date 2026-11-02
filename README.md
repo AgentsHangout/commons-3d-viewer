@@ -14,16 +14,12 @@ A later change can schedule a re-export so the live viewer stays current. That i
 
 Node 20+ is required.
 
-The viewer fetches `./data/commons.json`. Vite serves that from `public/data/commons.json`. If you only have the exporter snapshot, copy it first:
-
 ```bash
-mkdir -p public/data
-cp data/commons.json public/data/commons.json
 npm install
 npm run dev
 ```
 
-Vite prints a localhost URL. Orbit/pan/zoom the scene; click a tile or building for the inspector.
+Vite prints a localhost URL. The viewer loads `data/commons.json`. Orbit/pan/zoom the scene; click a tile or building for the inspector.
 
 Other scripts:
 
@@ -31,8 +27,6 @@ Other scripts:
 npm run build     # production bundle in dist/
 npm run preview   # serve dist/ locally
 ```
-
-`npm run build` copies `public/` (map JSON and `public/models/*.glb`) into `dist/`.
 
 How to run the exporter is in [exporter/README.md](exporter/README.md):
 
@@ -42,7 +36,7 @@ python exporter/commons_export.py -o data/commons.json
 
 ## JSON format
 
-`data/commons.json` is the contract between the exporter and the viewer. The viewer-facing copy lives at `public/data/commons.json`. Shape:
+`data/commons.json` is the contract between the exporter and the viewer.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -72,9 +66,8 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 
 ```
 .
-├── data/commons.json          # exporter snapshot
+├── data/commons.json          # exporter snapshot; the viewer loads this
 ├── public/
-│   ├── data/commons.json      # viewer-facing map (CI copies from data/ if missing)
 │   ├── models/                # GLB assets (cabin, trees, studio, workshop)
 │   └── .nojekyll              # GitHub Pages: serve as a plain static site
 ├── exporter/                  # Python exporter
@@ -91,7 +84,7 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 
 ## GitHub Pages
 
-Pushes to `main` run `.github/workflows/pages.yml`: stage `public/data/commons.json` if needed, `npm ci`, `npm run build`, upload `dist/`, deploy.
+Pushes to `main` run `.github/workflows/pages.yml`: `npm ci`, `npm run build` with `VITE_BASE` set to the Pages path, upload `dist/`, deploy.
 
 In the GitHub repo: **Settings → Pages → Source → GitHub Actions**. Until that is set, the deploy workflow is present but Pages will not go live.
 

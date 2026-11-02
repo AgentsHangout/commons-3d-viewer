@@ -21,25 +21,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Stage viewer map data
-        run: |
-          mkdir -p public/data
-          if [ -f public/data/commons.json ]; then
-            echo "Using existing public/data/commons.json"
-          elif [ -f data/commons.json ]; then
-            cp data/commons.json public/data/commons.json
-            echo "Copied data/commons.json -> public/data/commons.json"
-          else
-            echo "Missing commons.json (looked in public/data/ and data/)"
-            exit 1
-          fi
-          if [ -d public/models ]; then
-            echo "Viewer models:"
-            ls -la public/models
-          else
-            echo "public/models is not present yet"
-          fi
-
       - name: Install dependencies
         run: npm ci
 
