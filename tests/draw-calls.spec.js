@@ -90,6 +90,7 @@ test.describe('Commons draw-call budget', () => {
     }
 
     expect(calls, 'expected at least one draw call after the scene rendered').toBeGreaterThan(0);
+    expect(calls, 'default baseline scene should render at exactly 20 nominal draw calls').toBe(20);
     expect(
       calls,
       `draw calls ${calls} exceed the budget of ${DRAW_CALL_LIMIT} (edit tests/perf.config.js or set DRAW_CALL_LIMIT)`
@@ -354,7 +355,8 @@ test.describe('Commons draw-call budget', () => {
       expect(Math.abs(roadMesh.roughness - straightRoughness)).toBeLessThanOrEqual(0.05);
     }
 
-    // 6. Draw-Call Ceiling Check (nominal 18, strictly <= 20)
-    expect(calls).toBeLessThanOrEqual(20);
+    // 6. Draw-Call Ceiling & Exact Baseline Check
+    expect(calls, 'default scene must match nominal baseline of 20 draw calls').toBe(20);
+    expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
   });
 });

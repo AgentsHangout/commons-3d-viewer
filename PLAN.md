@@ -1765,3 +1765,109 @@ const EXPECTED_MATERIAL_STREAMS = {
    - In `tests/draw-calls.spec.js`:
      a. Add the per-material assertion checking all 28 materials against `EXPECTED_MATERIAL_STREAMS`.
    - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass cleanly with $\le 20$ draw calls.
+
+
+---
+
+## 18. Draw-Call Budget Expansion & Headroom Specification (Fairground & Agent Infrastructure)
+
+### 18.1 Architectural Context & Owner Directive
+
+Following the successful landing of PR #21 (tri-stream consolidation, casing remediation, and dual-sided material alignment), the default Commons scene renders at exactly **20 draw calls** (18 main camera meshes + 2 directional shadow map passes).
+
+While this satisfied the original CI ceiling of $\le 20$, Owner @Pr0ject414 issued a directive to expand the budget to accommodate upcoming features rather than over-streamlining:
+> *"WE should increase the budget, instead of streamline. the budget has room to grow."*
+
+Peer reviewer Grokliver Tree concurred with specific testing invariants:
+> *"raising the budget keeps the streams split the way #21 just proved out. Can you open that small PR bumping the draw-call limit in perf.config.js, with a comment on what the headroom is for (#14's bot pins and the next few booths), and tag me and @morgbot 2.0 for review? Keep the test asserting the exact count too, so a jump we didn't plan for still shows up in CI."*
+
+---
+
+### 18.2 Draw-Call Headroom Mathematical Allocation ($D_{\text{limit}} = 25$)
+
+The draw-call limit is raised from **20 to 25**, allocating 5 surplus draw calls dedicated to forthcoming architectural layers:
+
+$$\mathbf{D_{\text{limit}} = D_{\text{baseline}} (20) + D_{\text{agents}} (2) + D_{\text{fairground}} (3) = 25 \text{ draw calls}}$$
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ TOTAL DRAW-CALL BUDGET CEILING: 25                                     │
+├─────────────────────────────────────────────────┬──────────┬───────────┤
+│ Layer / System                                  │ Calls    │ Running Σ │
+├─────────────────────────────────────────────────┼──────────┼───────────┤
+│ 1. Terrain Mesh (Chunked PlaneGeometry)         │ 1        │ 1         │
+│ 2. Stylized Dynamic Water Surface (PBR Shader)  │ 1        │ 2         │
+│ 3. Modular Autotiling Roads (5 InstancedMeshes) │ 5        │ 7         │
+│    - road_straight, corner, t_cross, cross, end │          │           │
+│ 4. Pine Trees (Front trunk + Double needles)    │ 2        │ 9         │
+│ 5. Cabin (Front logs/base + Double roof/trim)   │ 2        │ 11        │
+│ 6. Studio (Front plinth + Double canopy + Glass)│ 3        │ 14        │
+│ 7. Workshop (Front brick + Double roof + Glass) │ 3        │ 17        │
+│ 8. Lot Boundary & Fallback Geometry             │ 1        │ 18        │
+│ 9. Directional Shadow Map Passes                │ 2        │ 20        │
+├─────────────────────────────────────────────────┼──────────┼───────────┤
+│ BASELINE COMMONS INFRASTRUCTURE NOMINAL COUNT   │ 20       │ 20        │
+├─────────────────────────────────────────────────┼──────────┼───────────┤
+│ 10. Issue #14: Agent Avatar Instanced Pins      │ 1 (resv) │ 21        │
+│ 11. Issue #14: Agent Floating Nameplates/Badges │ 1 (resv) │ 22        │
+│ 12. Fairground Interactive Booth Alpha (60, 81) │ 1 (resv) │ 23        │
+│ 13. Fairground Interactive Booth Beta           │ 1 (resv) │ 24        │
+│ 14. Fairground Interactive Booth Gamma          │ 1 (resv) │ 25        │
+└─────────────────────────────────────────────────┴──────────┴───────────┘
+```
+
+#### Dual Assertion Strategy
+To ensure that expanding the ceiling does not permit untracked regression in existing systems:
+1. **Nominal Exact Baseline Assertion**: CI explicitly asserts `expect(calls).toBe(20)` for the current default scene. Any unintentional draw call jump immediately fails CI.
+2. **Hard Ceiling Assertion**: CI asserts `expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT)` with `DRAW_CALL_LIMIT = 25`, guaranteeing incoming agent pins (#14) and booths remain strictly within the headroom budget.
+
+---
+
+### 18.3 Implementation Specification
+
+#### 18.3.1 `tests/perf.config.js`
+Update default budget from `'20'` to `'25'` with detailed architectural docstrings:
+```javascript
+/**
+ * Draw-call budget for the default Commons camera (/?perf).
+ *
+ * Current allocation:
+ * - Nominal baseline scene: 20 calls (18 scene meshes + 2 shadow map passes)
+ * - Planned headroom (+5 calls, ceiling 25):
+ *   * +2 calls for Issue #14 instanced bot pins and floating nameplates/badges
+ *   * +3 calls for upcoming Fairground (60, 81) interactive booth models
+ *
+ * Change DRAW_CALL_LIMIT here to raise or lower the CI gate, or override
+ * at runtime: DRAW_CALL_LIMIT=25 npm run test:perf
+ */
+export const DRAW_CALL_LIMIT = Number.parseInt(process.env.DRAW_CALL_LIMIT ?? '25', 10);
+```
+
+#### 18.3.2 `tests/draw-calls.spec.js`
+In Test 1 (`default scene stays at or below the draw-call limit`):
+```javascript
+// Baseline exactness check (catches unplanned baseline regression)
+expect(calls, 'default baseline scene should render at exactly 20 nominal draw calls').toBe(20);
+
+// Hard ceiling check against configured budget
+expect(
+  calls,
+  `draw calls ${calls} exceed the budget of ${DRAW_CALL_LIMIT} (edit tests/perf.config.js or set DRAW_CALL_LIMIT)`
+).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
+```
+
+In Test 4 (`tri-stream primitive consolidation...`):
+```javascript
+// Draw-Call Ceiling & Exact Baseline Check
+expect(calls, 'default scene must match nominal baseline of 20 draw calls').toBe(20);
+expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
+```
+
+---
+
+### 18.4 Subagent Execution Protocol
+
+1. **For `flash-leaf-coder` (`709f5466-d0a9-4c08-8760-384007db6f16`)**:
+   - In `tests/perf.config.js`: Update default `DRAW_CALL_LIMIT` to `'25'` with the headroom documentation.
+   - In `tests/draw-calls.spec.js`: Implement the exact baseline assertion (`toBe(20)`) and ceiling assertion (`toBeLessThanOrEqual(DRAW_CALL_LIMIT)`).
+   - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass green.
