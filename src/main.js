@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { createWaterSystem } from './waterShader.js';
+
+let waterSystem = null;
 
 // Setup Renderer, Scene & Camera
 const container = document.getElementById('canvas-container');
@@ -33,6 +36,9 @@ if (camParam === 'cabin') {
 } else if (camParam === 'studio') {
   camera.position.set(22, 6, 66);
   controls.target.set(22, 0, 57);
+} else if (camParam === 'lake') {
+  camera.position.set(31, 14, 48);
+  controls.target.set(31, 0, 30);
 } else {
   camera.position.set(60, 45, 115);
   controls.target.set(60, 0, 81);
@@ -411,6 +417,9 @@ function buildWorld(data) {
   const terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
   terrainMesh.receiveShadow = true;
   scene.add(terrainMesh);
+
+  // 1b. Dynamic Stylized Water System (Phase 4, PLAN.md Section 8)
+  waterSystem = createWaterSystem(data, scene);
 
   // 2. Modular Autotiling Roads via InstancedMesh (PLAN.md Section 4 & 6)
   const roadTransforms = {
@@ -964,9 +973,12 @@ window.addEventListener('resize', () => {
 });
 
 // Animation Loop
-function animate() {
+function animate(timestamp) {
   requestAnimationFrame(animate);
   controls.update();
+  if (waterSystem && typeof waterSystem.update === 'function') {
+    waterSystem.update((timestamp || performance.now()) * 0.001);
+  }
   renderer.render(scene, camera);
 }
 
