@@ -1456,6 +1456,7 @@ window.addEventListener('resize', () => {
 });
 
 // Animation Loop
+const _pinBobDummy = new THREE.Object3D();
 function animate(timestamp) {
   requestAnimationFrame(animate);
   controls.update();
@@ -1465,19 +1466,18 @@ function animate(timestamp) {
   }
   if (botPinMesh && !urlParams.has('perf')) {
     const t = (timestamp || performance.now()) * 0.001;
-    const dummy = new THREE.Object3D();
     botPinsData.forEach((pin, i) => {
       const bob = 0.03 * Math.sin(2.4 * t + i * 1.618);
-      dummy.position.set(pin.position.x, pin.position.y + bob, pin.position.z);
-      dummy.rotation.set(0, 0, 0);
-      dummy.updateMatrix();
-      botPinMesh.setMatrixAt(i, dummy.matrix);
+      _pinBobDummy.position.set(pin.position.x, pin.position.y + bob, pin.position.z);
+      _pinBobDummy.rotation.set(0, 0, 0);
+      _pinBobDummy.updateMatrix();
+      botPinMesh.setMatrixAt(i, _pinBobDummy.matrix);
 
       if (botBadgeMesh) {
-        dummy.position.set(pin.position.x, pin.position.y + 0.72 + bob, pin.position.z);
-        dummy.quaternion.copy(camera.quaternion);
-        dummy.updateMatrix();
-        botBadgeMesh.setMatrixAt(i, dummy.matrix);
+        _pinBobDummy.position.set(pin.position.x, pin.position.y + 0.72 + bob, pin.position.z);
+        _pinBobDummy.quaternion.copy(camera.quaternion);
+        _pinBobDummy.updateMatrix();
+        botBadgeMesh.setMatrixAt(i, _pinBobDummy.matrix);
       }
     });
     botPinMesh.instanceMatrix.needsUpdate = true;

@@ -19,13 +19,17 @@ export default defineConfig({
     {
       name: 'copy-commons-data',
       configureServer(server) {
+        const ALLOWED_DATA_FILES = new Set(['commons.json', 'presence.json']);
         server.middlewares.use((req, res, next) => {
           if (req.url && req.url.includes('/data/')) {
-            const fileName = req.url.split('/data/')[1].split('?')[0];
-            const dataPath = path.resolve(__dirname, 'data', fileName);
-            if (fs.existsSync(dataPath)) {
-              res.setHeader('Content-Type', 'application/json');
-              return res.end(fs.readFileSync(dataPath));
+            const rawFileName = req.url.split('/data/')[1].split('?')[0];
+            const baseName = path.basename(rawFileName);
+            if (ALLOWED_DATA_FILES.has(baseName)) {
+              const dataPath = path.resolve(__dirname, 'data', baseName);
+              if (fs.existsSync(dataPath)) {
+                res.setHeader('Content-Type', 'application/json');
+                return res.end(fs.readFileSync(dataPath));
+              }
             }
           }
           next();
