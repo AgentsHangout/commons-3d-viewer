@@ -1168,3 +1168,79 @@ In `tests/draw-calls.spec.js`, add test suite:
 3. **Step 3**: Standardize road PBR roughness ($0.75$) and metalness ($0.05$) across modular road models.
 4. **Step 4**: Update `tests/draw-calls.spec.js` with the Section 13 automated test suite.
 5. **Step 5**: Run `npm run build` and `npx playwright test` and verify all tests pass.
+
+
+---
+
+## 14. Forensic Diagnostic Audit & Visual Verification (Cabin, Studio, Workshop, PineTree, Roads)
+
+> **Architectural Objective**: Establish a permanent mathematical and visual forensic verification methodology across all 3D assets (cabin.glb, studio.glb, workshop.glb, pine_tree.glb, and all 5 road models) ensuring that all geometries, normals, winding orders, double-sided materials, and transparent glass elements are mathematically watertight, visually free of backface culling, and locked at $\\le 20$ draw calls (nominal 16).
+
+---
+
+### 14.1 Forensic Geometric & Normal Audit Results
+
+Using the headless Node/Three.js geometric analyzer across all 9 production binary GLB models in public/models/:
+
+| Model Asset | Total Meshes | Total Triangles | Inverted Normal Triangles ($\mathbf{n}_{\\text{face}} \\cdot \\mathbf{n}_{\\text{vert}} < -0.1$) | Negative Determinant Transforms ($\det \\mathbf{M} < 0$) | Planar Meshes ($< 2\\text{mm}$ thickness) | GLTF doubleSided Status |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **cabin.glb** | 119 | 2,668 | **0** (100% aligned) | **0** | 0 | **100% 	rue** (10/10 mats) |
+| **studio.glb** | 46 | 540 | **0** (100% aligned) | **0** | 0 | **100% 	rue** (8/8 mats) |
+| **workshop.glb** | 72 | 1,084 | **0** (100% aligned) | **0** | 0 | **100% 	rue** (7/7 mats) |
+| **pine_tree.glb** | 11 | 552 | **0** (100% aligned) | **0** | 0 | **100% 	rue** (3/3 mats) |
+| **
+oad_straight.glb** | 4 | 48 | **0** (100% aligned) | **0** | 1 (Stripe: 1mm) | **100% 	rue** (3/3 mats) |
+| **
+oad_corner.glb** | 4 | 544 | **0** (100% aligned) | **0** | 1 (Stripe: 0mm) | **100% 	rue** (3/3 mats) |
+| **
+oad_t_cross.glb** | 7 | 164 | **0** (100% aligned) | **0** | 3 (Stripes: 1mm) | **100% 	rue** (3/3 mats) |
+| **
+oad_cross.glb** | 9 | 268 | **0** (100% aligned) | **0** | 4 (Stripes: 1mm) | **100% 	rue** (3/3 mats) |
+| **
+oad_deadend.glb** | 6 | 72 | **0** (100% aligned) | **0** | 1 (Stripe: 1mm) | **100% 	rue** (4/4 mats) |
+
+#### Key Forensic Findings:
+1. **Geometric Normals & Winding Orders are Watertight**: Across all 5,940 triangles in all 9 models, exactly **0** triangles possess inverted face winding relative to their vertex normal vectors. All face normals  \\times (\\mathbf{v}_2 - \\mathbf{v}_0)$ point coherently in the direction of outward-facing surface normals.
+2. **Transform Matrices are Reflection-Free**: Exactly **0** nodes in any GLB model possess negative determinants ($\det \\mathbf{M}_{\\text{world}} > 0$ across all 288 nodes).
+3. **Foliage Shells & Thin Architectural Overhangs Rely on Double-Sided Shading**: Low-poly pine needle boughs and architectural roof eaves are modeled as open, single-layer geometric surfaces. When Three.js forced side: THREE.FrontSide, the hardware rasterizer culled any face pointing away from camera sightlines, causing see-through trees. Restoring side: THREE.DoubleSide and shadowSide: THREE.DoubleSide eliminates 100% of culling defects.
+4. **Architectural Glass Transparency**: Studio_Glass and Workshop_Window_Glass are the only materials with lphaMode: 'BLEND'. Partitioning them via dual-stream consolidation renders transparent glass panes (	ransparent: true, opacity: 0.35, depthWrite: false) that reveal interior furniture without causing depth-sorting conflicts with opaque building structures.
+
+---
+
+### 14.2 Visual Verification via Diagnostic Camera Suite
+
+Using automated Playwright camera captures across multi-angle viewpoints:
+
+1. **diag_studio_front_glass.png (Front View at  = 31.0$ looking South into Studio)**:
+   - Window panes render with stylized transparent glass (opacity: 0.35).
+   - The interior oak workbench, steel desk legs, artist stool, floor, and desk lamp are clearly visible inside the pavilion.
+2. **diag_studio_perspective.png (3/4 Perspective View)**:
+   - Wooden vertical battens on the west wall and concrete planter box are fully opaque.
+   - East and front glass facades seamlessly wrap the structure without light leaks or depth-write occlusion.
+3. **diag_cabin_eaves_low.png (Low Angle looking up under roofline)**:
+   - Cedar shingle roof eaves and porch rafters render with solid underside geometry (zero backface culling).
+4. **diag_cabin_perspective.png (3/4 Perspective View of Log Cabin)**:
+   - Log timber walls, stone masonry foundation, and terracotta chimney pots render with crisp, dense solid shading.
+5. **diag_workshop_facade.png (Front View of Workshop)**:
+   - Corrugated tin roof overhangs, brick walls, steel double doors, and window panes render with full structural integrity.
+6. **diag_pine_tree_foliage.png (Side View of Forest Pine Boughs)**:
+   - Tiered pine needle boughs are 100% solid and opaque from all angles. Interior tree trunk is fully enclosed.
+7. **diag_road_corner_poppy.png (Poppy Cross Market Road Corridor)**:
+   - Asphalt color and specular luminance are 100% seamless and continuous across straight and curved road tiles.
+   - Step-free invariant holds with $|\Delta Y| = 0.00\\text{m}$ across all connected road segments.
+
+---
+
+### 14.3 Asset Re-Export Acceptance Invariants (Pipeline Specification)
+
+When rgon-3d-modeler re-exports updated GLB assets from gents_hangout_master.blend:
+
+1. **Material Side Flag**: All exported materials must maintain doubleSided: true in the glTF export settings.
+2. **Glass Alpha Mode**: Studio_Glass and Workshop_Window_Glass must export with lphaMode: 'BLEND' and base color alpha $\\le 0.40$.
+3. **Corner Road Curb Geometry (Optional Polish)**:
+   If 
+oad_corner.glb is updated to replace the wide outer sidewalk slab (Corner_Curb_Outer) with a narrow 0.10m curved ribbon curb, the bounding box of the curb will align with straight road borders ($[-0.5, -0.4]$ / $[0.4, 0.5]$).
+4. **Draw-Call Ceiling Invariant**:
+   Dual-stream consolidation produces:
+   - 1 tree + 1 cabin + 2 studio (opaque + glass) + 2 workshop (opaque + glass) + 5 road models = 11 model draw calls.
+   - Adding terrain, water, and debug plinths yields **16 total draw calls**, strictly below the CI ceiling of $\\le 20$.

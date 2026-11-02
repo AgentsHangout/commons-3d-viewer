@@ -139,6 +139,7 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
   let totalMetalness = 0;
   let primaryTexture = null;
   let anyHasUV = false;
+  let anyDoubleSided = false;
 
   // 1. First pass: inspect UV attributes
   gltfScene.traverse((child) => {
@@ -147,6 +148,9 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
   });
 
   // Helper: detect if a mesh/material is transparent glass
+  // In production GLTFs, this matches:
+  // - Studio: 'Studio_Glass'
+  // - Workshop: 'Workshop_Window_Glass'
   const isGlassPrimitive = (mat, name) => {
     if (!mat) return false;
     if (mat.alphaMode === 'BLEND') return true;
@@ -161,6 +165,10 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
     if (!child.isMesh || !child.geometry) return;
     const mat = Array.isArray(child.material) ? child.material[0] : child.material;
     const isGlass = isGlassPrimitive(mat, child.name);
+
+    if (!isGlass && mat && mat.side === THREE.DoubleSide) {
+      anyDoubleSided = true;
+    }
 
     const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
     const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;
@@ -263,8 +271,8 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
       vertexColors: true,
       roughness: avgRoughness,
       metalness: avgMetalness,
-      side: THREE.DoubleSide,
-      shadowSide: THREE.DoubleSide,
+      side: anyDoubleSided ? THREE.DoubleSide : THREE.FrontSide,
+      shadowSide: anyDoubleSided ? THREE.DoubleSide : THREE.FrontSide,
       transparent: false,
       depthWrite: true
     });
@@ -970,7 +978,12 @@ function buildWorld(data) {
       getRoadTransforms: () => roadTransforms,
       getRoadElevation: (x, y) => roadElevationGrid[y] ? roadElevationGrid[y][x] : undefined,
       getRoadItems: () => roadItems,
-      getLoadedModels: () => loadedModels
+      getLoadedModels: () => loadedModels,
+      setCameraView: (cam, target) => {
+        camera.position.set(cam.x, cam.y, cam.z);
+        controls.target.set(target.x, target.y, target.z);
+        controls.update();
+      }
     };
   }
 }
