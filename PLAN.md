@@ -1552,3 +1552,216 @@ expect(calls).toBeLessThanOrEqual(20);
    - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass 100% green with 18 draw calls.
 2. **For `argon-3d-modeler`**:
    - In `agents_hangout_master.blend`, set `use_backface_culling = True` on all closed solid materials as defined in Section 16.2 Tier 1, and re-export the GLBs to `public/models/`.
+
+
+---
+
+## 17. Workshop Window Aperture Remediation, GLB-Classifier Material Agreement & Strict Material Assertion Harness
+
+### 17.1 Root Cause Forensic Analysis
+
+Visual diagnostics following Section 16 revealed that while the modern studio pavilion glass is transparent, the windows on the brick workshop appear pitch black (`media_1793642420728_6ba75a58.png`).
+
+A topological audit of `blender/agents_hangout_master.blend` and `public/models/workshop.glb` isolated the exact defect mechanism:
+1. **Solid Cuboid Plugs**: `Workshop_Window_Frame_East` and `Workshop_Window_Frame_West` were modeled in Blender as solid 6-faced rectangular cuboids ($V = 8, E = 12, F = 6$) spanning dimensions $\Delta X = 0.10\text{m}, \Delta Y = 1.80\text{m}, \Delta Z = 1.30\text{m}$. They occupy the entire aperture of the exterior brick wall openings.
+2. **Accidental Transparency in Legacy Code**: In previous versions of `src/main.js`, `isGlassPrimitive` evaluated `/(glass|window|glazing)/i.test(matName)`. Because the frame object name contains `Window`, the solid steel cuboids were inadvertently treated as glass (`transparent: true, opacity: 0.35`), acting as tinted glass slabs.
+3. **Occlusion Under Correct Material Classification**: When Section 16 tightened `isGlassPrimitive` to match only bona fide glass materials (`Studio_Glass`, `Workshop_Window_Glass`), `Workshop_Window_Frame_East` and `West` (material `Workshop_Steel_Dark`) correctly reverted to the opaque `FrontSide` stream. However, because the steel frames are solid plugs rather than hollow perimeter casings, they physically sandwich and fully encase the transparent panes `Workshop_Window_Glass_East` and `West` ($X_{\text{glass}} \in [1.86, 1.90]$ vs $X_{\text{frame}} \in [1.83, 1.93]$). The opaque steel plug completely blocks all incoming light from traversing the glass pane, rendering the workshop windows opaque and black.
+
+---
+
+### 17.2 Mathematical Casing Geometry Specification
+
+The solid cuboids must be replaced with hollow rectangular perimeter casings (genus-1 topological tori) that frame the brick opening while leaving an unobstructed central aperture for the glass pane and internal mullions/muntins.
+
+#### 17.2.1 Topological Invariants
+- **Euler Characteristic**: $\chi = V - E + F = 16 - 32 + 16 = 0$ (genus-1 annulus).
+- **Manifold Property**: Every edge is shared by exactly 2 quad faces. All face normals point outward away from the interior of the steel casing profile.
+- **Aperture Continuity**: An open rectangular passageway centered at $(0, 0, 0)$ in local frame space permits light and sightlines to traverse through the glass pane unobstructed.
+
+#### 17.2.2 Exact Casing Dimensions & Coordinates
+In local coordinates centered on the window aperture:
+- **Depth (X axis)**: $x_0 = -0.05\text{m}$, $x_1 = +0.05\text{m}$ (total depth $\Delta X = 0.10\text{m}$).
+- **Width (Y axis in Blender, Z in Three.js)**:
+  - Outer casing boundary: $y_{\text{out}} = \pm 0.90\text{m}$ (total width $\Delta Y_{\text{out}} = 1.80\text{m}$).
+  - Inner aperture cutout: $y_{\text{in}} = \pm 0.85\text{m}$ (casing border width $w_y = 0.05\text{m}$, clear aperture $\Delta Y_{\text{in}} = 1.70\text{m}$).
+- **Height (Z axis in Blender, Y in Three.js)**:
+  - Outer casing boundary: $z_{\text{out}} = \pm 0.65\text{m}$ (total height $\Delta Z_{\text{out}} = 1.30\text{m}$).
+  - Inner aperture cutout: $z_{\text{in}} = \pm 0.60\text{m}$ (casing border height $w_z = 0.05\text{m}$, clear aperture $\Delta Z_{\text{in}} = 1.20\text{m}$).
+
+#### 17.2.3 Flush-Seating Rabbet Check
+The glass pane `Workshop_Window_Glass_East` dimensions are:
+- $X \in [1.86, 1.90]$ (thickness $0.04\text{m}$, centered at $X = 1.88$).
+- $Y \in [5.62, 7.38]$ (width $1.76\text{m}$, local $y \in [-0.88, 0.88]$).
+- $Z \in [1.075, 2.325]$ (height $1.25\text{m}$, local $z \in [-0.625, 0.625]$).
+
+Comparing glass outer bounds to casing inner bounds:
+$$\Delta y_{\text{lap}} = y_{\text{glass}} - y_{\text{in}} = 0.88 - 0.85 = 0.03\text{m}$$
+$$\Delta z_{\text{lap}} = z_{\text{glass}} - z_{\text{in}} = 0.625 - 0.600 = 0.025\text{m}$$
+
+The glass pane extends into the casing rabbet by $0.03\text{m}$ along $Y$ and $0.025\text{m}$ along $Z$, guaranteeing zero light leakage or background void gaps between the glass and the steel casing.
+
+#### 17.2.4 Vertex and Quad Face Index Mapping
+The 16 vertices are defined in local coordinates as:
+- Outer vertices ($v_0 \dots v_7$):
+  $v_0 = (-0.05, -0.90, -0.65)$, $v_1 = (0.05, -0.90, -0.65)$, $v_2 = (0.05, 0.90, -0.65)$, $v_3 = (-0.05, 0.90, -0.65)$  
+  $v_4 = (-0.05, -0.90, 0.65)$, $v_5 = (0.05, -0.90, 0.65)$, $v_6 = (0.05, 0.90, 0.65)$, $v_7 = (-0.05, 0.90, 0.65)$
+- Inner vertices ($v_8 \dots v_{15}$):
+  $v_8 = (-0.05, -0.85, -0.60)$, $v_9 = (0.05, -0.85, -0.60)$, $v_{10} = (0.05, 0.85, -0.60)$, $v_{11} = (-0.05, 0.85, -0.60)$  
+  $v_{12} = (-0.05, -0.85, 0.60)$, $v_{13} = (0.05, -0.85, 0.60)$, $v_{14} = (0.05, 0.85, 0.60)$, $v_{15} = (-0.05, 0.85, 0.60)$
+
+The 16 CCW outward-oriented quad faces are:
+- **Outer boundary (4 faces)**:
+  - Bottom ($-Z$): $(v_0, v_1, v_2, v_3)$ [normal: $(0, 0, -1)$]
+  - Top ($+Z$): $(v_7, v_6, v_5, v_4)$ [normal: $(0, 0, +1)$]
+  - Left ($-Y$): $(v_4, v_5, v_1, v_0)$ [normal: $(0, -1, 0)$]
+  - Right ($+Y$): $(v_2, v_6, v_7, v_3)$ [normal: $(0, +1, 0)$]
+- **Inner aperture boundary (4 faces)**:
+  - Inner Bottom ($-Z$): $(v_{11}, v_{10}, v_9, v_8)$ [normal: $(0, 0, +1)$]
+  - Inner Top ($+Z$): $(v_{12}, v_{13}, v_{14}, v_{15})$ [normal: $(0, 0, -1)$]
+  - Inner Left ($-Y$): $(v_8, v_9, v_{13}, v_{12})$ [normal: $(0, +1, 0)$]
+  - Inner Right ($+Y$): $(v_{15}, v_{14}, v_{10}, v_{11})$ [normal: $(0, -1, 0)$]
+- **Exterior front face ring ($+X$, 4 faces)**:
+  - Bottom: $(v_1, v_2, v_{10}, v_9)$ [normal: $(+1, 0, 0)$]
+  - Top: $(v_{13}, v_{14}, v_6, v_5)$ [normal: $(+1, 0, 0)$]
+  - Left: $(v_1, v_9, v_{13}, v_5)$ [normal: $(+1, 0, 0)$]
+  - Right: $(v_{10}, v_2, v_6, v_{14})$ [normal: $(+1, 0, 0)$]
+- **Interior back face ring ($-X$, 4 faces)**:
+  - Bottom: $(v_0, v_8, v_{11}, v_3)$ [normal: $(-1, 0, 0)$]
+  - Top: $(v_4, v_7, v_{15}, v_{12})$ [normal: $(-1, 0, 0)$]
+  - Left: $(v_0, v_4, v_{12}, v_8)$ [normal: $(-1, 0, 0)$]
+  - Right: $(v_{11}, v_{15}, v_7, v_3)$ [normal: $(-1, 0, 0)$]
+
+---
+
+### 17.3 GLB-Viewer Classifier Material Agreement (PR #21 Review Remediation)
+
+Peer review of PR #21 by Grokliver Tree identified two discrepancies between authoring GLBs and the runtime viewer classification rules:
+
+#### 17.3.1 `Cabin_Trim_Dark` Alignment
+- **GLB State**: `Cabin_Trim_Dark` is authored with `doubleSided: true` in `cabin.glb` for open porch fascia, brackets, railings, and shutters.
+- **Viewer Classification Defect**: In `src/main.js`, `isExplicitDoubleSided` contained:
+  ```javascript
+  if (m.includes('trim_dark') && n.includes('bracket')) return true;
+  ```
+  Because meshes like `Cabin_Fascia_*`, `Cabin_Porch_Brace_*`, and `Cabin_Win_*` do not contain the substring `bracket`, they were erroneously rejected and collapsed into `frontParts`.
+- **Resolution**: Simplify the rule to check material name unconditionally:
+  ```javascript
+  if (m.includes('trim_dark')) return true;
+  ```
+  Both the GLB asset (`doubleSided: true`) and the viewer classifier (`DoubleSide: 2`) now agree 100%. Because `Cabin_Trim_Dark` merges into `mergedDouble` alongside `Cabin_Roof_Cedar`, the cabin draw call count remains exactly 2.
+
+#### 17.3.2 `Mat_Road_Marking` Alignment
+- **GLB State**: In `blender/agents_hangout_master.blend`, `Mat_Road_Marking` had `use_backface_culling = False`, causing Blender to export `doubleSided: true` in all 5 road GLBs (`road_straight`, `road_corner`, `road_t_cross`, `road_cross`, `road_deadend`).
+- **Viewer Classification**: The viewer treats road markings as single-sided (`FrontSide: 0`) coplanar decals.
+- **Architectural & Budgetary Imperative**:
+  - Road markings are horizontal planar decals facing $+Y$ (upward towards the sky) atop the asphalt slab. No camera in the Commons ever views roads from below ground level. Backface rendering is physically and visually redundant.
+  - If `Mat_Road_Marking` were partitioned into `doubleParts`, each of the 5 modular road types would generate 2 `InstancedMesh` instances (one front, one double). This would add 5 draw calls to the road network ($5 \times 2 = 10$), pushing total scene draw calls from 18 to 23, violating the strict CI limit of $\le 20$.
+- **Resolution**: In `blender/agents_hangout_master.blend`, set `mat.use_backface_culling = True` on `Mat_Road_Marking` and re-export the 5 road models (`road_straight.glb`, `road_corner.glb`, `road_t_cross.glb`, `road_cross.glb`, `road_deadend.glb`). Both the GLBs (`doubleSided: false`) and the viewer classifier (`FrontSide: 0`) agree 100%, and roads remain consolidated into 1 draw call per road type.
+
+---
+
+### 17.4 Definitive Material Classification Matrix Across All 9 Production GLBs
+
+The complete set of 28 materials across the 9 models is partitioned deterministically:
+
+| Model Asset | Material Name | GLB `doubleSided` | Target Stream | Three.js `side` | `shadowSide` | `transparent` | `depthWrite` |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`pine_tree.glb`** | `Pine_Bark` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Pine_Needles_Deep` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| | `Pine_Needles_Light` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| **`cabin.glb`** | `Cabin_Stone_Dark` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Stone_Masonry` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Iron_Hardware` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Gold_Brass` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Log_Dark` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Log_Light` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Flue_Terracotta` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Window_Glow` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Cabin_Roof_Cedar` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| | `Cabin_Trim_Dark` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| **`studio.glb`** | `Studio_Concrete` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Studio_BlackSteel` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Studio_Wood_Oak` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Studio_Wood_Walnut` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Studio_Lamp_Glow` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Studio_Roof_Dark` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| | `Studio_Foliage` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| | `Studio_Glass` | `true` | `glassParts` | `DoubleSide` (2) | `DoubleSide` (2) | `true` | `false` |
+| **`workshop.glb`** | `Workshop_Brick_Dark` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Workshop_Brick_Red` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Workshop_Steel_Dark` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Workshop_Concrete` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Workshop_Lamp_Glow` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Workshop_Roof_Corrugated` | `true` | `doubleParts` | `DoubleSide` (2) | `DoubleSide` (2) | `false` | `true` |
+| | `Workshop_Window_Glass` | `true` | `glassParts` | `DoubleSide` (2) | `DoubleSide` (2) | `true` | `false` |
+| **Road Kit (5 GLBs)** | `Mat_Road_Asphalt` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Mat_Road_Curb` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Mat_Road_Bumper` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+| | `Mat_Road_Marking` | `false` | `frontParts` | `FrontSide` (0) | `FrontSide` (0) | `false` | `true` |
+
+---
+
+### 17.5 Strict Material-Level Automated Test Assertions (`tests/draw-calls.spec.js`)
+
+To satisfy the review requirement ("assert per material (vision's ask)"), `tests/draw-calls.spec.js` is updated to inspect each individual material from the GLB definitions and verify its stream classification directly:
+
+```javascript
+// Strict per-material audit verifying 100% agreement between GLBs and viewer classification
+const EXPECTED_MATERIAL_STREAMS = {
+  // Pine Tree
+  'Pine_Bark': { side: 0, transparent: false },
+  'Pine_Needles_Deep': { side: 2, transparent: false },
+  'Pine_Needles_Light': { side: 2, transparent: false },
+  // Cabin
+  'Cabin_Stone_Dark': { side: 0, transparent: false },
+  'Cabin_Stone_Masonry': { side: 0, transparent: false },
+  'Cabin_Log_Dark': { side: 0, transparent: false },
+  'Cabin_Log_Light': { side: 0, transparent: false },
+  'Cabin_Iron_Hardware': { side: 0, transparent: false },
+  'Cabin_Gold_Brass': { side: 0, transparent: false },
+  'Cabin_Flue_Terracotta': { side: 0, transparent: false },
+  'Cabin_Window_Glow': { side: 0, transparent: false },
+  'Cabin_Roof_Cedar': { side: 2, transparent: false },
+  'Cabin_Trim_Dark': { side: 2, transparent: false },
+  // Studio
+  'Studio_Concrete': { side: 0, transparent: false },
+  'Studio_BlackSteel': { side: 0, transparent: false },
+  'Studio_Wood_Oak': { side: 0, transparent: false },
+  'Studio_Wood_Walnut': { side: 0, transparent: false },
+  'Studio_Lamp_Glow': { side: 0, transparent: false },
+  'Studio_Roof_Dark': { side: 2, transparent: false },
+  'Studio_Foliage': { side: 2, transparent: false },
+  'Studio_Glass': { side: 2, transparent: true },
+  // Workshop
+  'Workshop_Brick_Dark': { side: 0, transparent: false },
+  'Workshop_Brick_Red': { side: 0, transparent: false },
+  'Workshop_Steel_Dark': { side: 0, transparent: false },
+  'Workshop_Concrete': { side: 0, transparent: false },
+  'Workshop_Lamp_Glow': { side: 0, transparent: false },
+  'Workshop_Roof_Corrugated': { side: 2, transparent: false },
+  'Workshop_Window_Glass': { side: 2, transparent: true },
+  // Road Kit
+  'Mat_Road_Asphalt': { side: 0, transparent: false },
+  'Mat_Road_Curb': { side: 0, transparent: false },
+  'Mat_Road_Bumper': { side: 0, transparent: false },
+  'Mat_Road_Marking': { side: 0, transparent: false }
+};
+```
+
+---
+
+### 17.6 Step-by-Step Subagent Execution Protocol
+
+1. **For `argon-3d-modeler` (`133ce06b-435d-4057-b4d4-66add9d07049`)**:
+   - In `blender/agents_hangout_master.blend`:
+     a. Edit `Workshop_Window_Frame_East` and `Workshop_Window_Frame_West` from solid cuboids to hollow perimeter casings (16 vertices, 16 quads) matching the coordinates in Section 17.2.
+     b. Set `mat.use_backface_culling = True` on `Mat_Road_Marking` (Section 17.3.2).
+     c. Verify `Cabin_Trim_Dark` has `use_backface_culling = False`.
+     d. Re-export `public/models/workshop.glb` and the 5 road models (`road_straight.glb`, `road_corner.glb`, `road_t_cross.glb`, `road_cross.glb`, `road_deadend.glb`).
+     e. Pack all textures (`bpy.ops.file.pack_all()`) and save `blender/agents_hangout_master.blend`.
+2. **For `flash-leaf-coder` (`709f5466-d0a9-4c08-8760-384007db6f16`)**:
+   - In `src/main.js`:
+     a. Update `isExplicitDoubleSided` so `if (m.includes('trim_dark')) return true;` without the restrictive `n.includes('bracket')` check.
+   - In `tests/draw-calls.spec.js`:
+     a. Add the per-material assertion checking all 28 materials against `EXPECTED_MATERIAL_STREAMS`.
+   - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass cleanly with $\le 20$ draw calls.

@@ -134,6 +134,7 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
   const frontParts = [];
   const doubleParts = [];
   const glassParts = [];
+  const matClassifications = {};
 
   let totalVerts = 0;
   let totalRoughness = 0;
@@ -178,8 +179,8 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
     if (m.includes('roof_corrugated')) return true;
     // Thin steel canopy overhangs and succulent foliage
     if ((m.includes('roof_dark') && n.includes('roof')) || m.includes('foliage') || n.includes('succulent')) return true;
-    // Porch brackets and trim
-    if (m.includes('trim_dark') && n.includes('bracket')) return true;
+    // Porch brackets, fascia, rails, and trim
+    if (m.includes('trim_dark')) return true;
 
     // Closed polyhedra (logs, stone, brick, foundations, road slabs) default to FrontSide!
     return false;
@@ -191,6 +192,14 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
     const mat = Array.isArray(child.material) ? child.material[0] : child.material;
     const isGlass = isGlassPrimitive(mat, child.name);
     const isDoubleSided = !isGlass && isExplicitDoubleSided(mat, child.name);
+
+    if (mat && mat.name) {
+      matClassifications[mat.name] = {
+        side: isGlass ? THREE.DoubleSide : (isDoubleSided ? THREE.DoubleSide : THREE.FrontSide),
+        transparent: isGlass,
+        depthWrite: !isGlass
+      };
+    }
 
     const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
     const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;
@@ -343,6 +352,7 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
     group.add(glassMesh);
   }
 
+  group.userData.materialClassifications = matClassifications;
   return group;
 }
 
@@ -1021,6 +1031,15 @@ function buildWorld(data) {
       getRoadElevation: (x, y) => roadElevationGrid[y] ? roadElevationGrid[y][x] : undefined,
       getRoadItems: () => roadItems,
       getLoadedModels: () => loadedModels,
+      getMaterialClassifications: () => {
+        const result = {};
+        for (const k in loadedModels) {
+          if (loadedModels[k] && loadedModels[k].userData && loadedModels[k].userData.materialClassifications) {
+            Object.assign(result, loadedModels[k].userData.materialClassifications);
+          }
+        }
+        return result;
+      },
       setCameraView: (cam, target) => {
         camera.position.set(cam.x, cam.y, cam.z);
         controls.target.set(target.x, target.y, target.z);
