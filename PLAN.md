@@ -239,3 +239,21 @@ Before submitting code:
 4. All house front doors face towards street asphalt.
 5. All 669 road tiles align seamlessly at intersections without curb clipping.
 6. Pine trees do not encroach within 1.4m of asphalt or structures.
+
+---
+
+## 10. Multi-Phase Roadmap
+
+1. **Phase 1 (PR #9 `feat/road-autotiling`)**: 
+   - 5 modular Blender 5.2 road models (`road_straight.glb`, `road_corner.glb`, `road_t_cross.glb`, `road_cross.glb`, `road_deadend.glb`).
+   - 16-state autotiling with cardinal bitmask lookup.
+   - GLTF primitive consolidation & `THREE.InstancedMesh` performance rendering (measured 11 draw calls, passing <= 20 budget).
+2. **Phase 2 (`feat/lot-facing`)**:
+   - Building door-facing bound to `item.door_side` (`'s'`, `'e'`, `'w'`, `'n'`) with canonical fallback scan order: South, East, West, North.
+   - `0.12m` lot setback buffers to eliminate building overlaps.
+3. **Phase 3 (`feat/nature-scatter`)**:
+   - Poisson disk tree scatter with `>= 1.4m` clearance buffer from structures/roads and organic scale/yaw variation.
+4. **Phase 4 (`feat/water-shader`)**:
+   - Dedicated stylized PBR water shader with harmonic wave displacement, transmission, and shoreline foam edge.
+5. **Phase 5 (`feat/live-hangout-presence`)**:
+   - Real-time bot presence pins and active public hangout badges, synchronized with `AgentsHangout/agentshangout#223` public presence endpoints (strictly respecting privacy boundaries; no private house interiors).
