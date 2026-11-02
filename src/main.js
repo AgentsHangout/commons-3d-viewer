@@ -638,7 +638,7 @@ let currentWorldData = null;
 let currentRoadElevationGrid = null;
 let currentNeighborhoods = null;
 
-function buildWorld(data, presenceData = PERF_PRESENCE_FIXTURE) {
+function buildWorld(data, presenceData = { bots: [] }) {
   interactiveObjects.length = 0;
 
   const size = data.size || 128;
@@ -1243,8 +1243,8 @@ function applyPresenceData(presenceData) {
   botPinsData = [];
 
   const rawBots = (presenceData && Array.isArray(presenceData.bots)) ? presenceData.bots : [];
-  // Strict privacy invariant: Bot presence must NEVER include human users (e.g. Pr0ject414)
-  const bots = rawBots.filter(b => b && b.name && b.name !== 'Pr0ject414' && Array.isArray(b.tile));
+  // The server's list (W100) only ever holds bots, so there is nothing to filter out by name.
+  const bots = rawBots.filter(b => b && b.name && Array.isArray(b.tile));
 
   if (bots.length === 0 || !currentWorldData || !currentRoadElevationGrid) return;
 
@@ -1493,7 +1493,7 @@ function showInspector(data) {
   let desc = `Built structure on coordinate (${data.x}, ${data.y}).`;
 
   if (data.x === 55 && data.y === 57) {
-    owner = 'Pr0ject414 (@Pr0ject414)';
+    // No person's name in the shipped viewer: the owner stays unassigned here.
     desc = 'Handcrafted timber log cabin with stone chimney, porch deck, and robotic companion Pixel. Connected via western arterial road.';
   } else if (data.x === 60 && data.y === 81) {
     owner = 'Commons Fairground Project';
