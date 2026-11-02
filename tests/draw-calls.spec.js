@@ -125,4 +125,70 @@ test.describe('Commons draw-call budget', () => {
     expect(res2.first?.z, 'expected first tree Z to match').toBeCloseTo(res1.first.z, 3);
     expect(res2.first?.scale, 'expected first tree scale to match').toBeCloseTo(res1.first.scale, 3);
   });
+
+  test('road grounding and terrain corridor grading eliminate occlusion (Issue #18)', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+
+    const elevationReport = await page.evaluate(() => {
+      if (!window.__perf) return null;
+      const getRoadElev = window.__perf.getRoadElevation;
+      const tMesh = window.__perf.getTerrainMesh();
+      const pos = tMesh?.geometry?.attributes?.position;
+      const size = 128;
+
+      const getTerrainY = (vx, vz) => {
+        const idx = vz * (size + 1) + vx;
+        return pos ? pos.getY(idx) : null;
+      };
+
+      // 1. Roads bordering forest at (45, 23)
+      const road45_23 = getRoadElev(45, 23);
+      // Boundary vertex (46, 23) shared between road (45, 23) and forest (46, 23)
+      const vertex46_23_y = getTerrainY(46, 23);
+
+      // 2. Southeast forest arterial roads at (115..123, 109)
+      const forestRoads = [];
+      for (let x = 115; x <= 123; x++) {
+        forestRoads.push(getRoadElev(x, 109));
+      }
+
+      // 3. Road near southern hills at (16, 92)
+      const road16_92 = getRoadElev(16, 92);
+
+      // 4. Sorrel Woods studio road cul-de-sac at (23, 57)
+      const road23_57 = getRoadElev(23, 57);
+
+      return {
+        road45_23,
+        vertex46_23_y,
+        forestRoads,
+        road16_92,
+        road23_57
+      };
+    });
+
+    expect(elevationReport, 'perf elevation inspection unavailable').not.toBeNull();
+
+    // 1. Border road at (45, 23) is on sand datum Y=0.00
+    expect(elevationReport.road45_23).toBeCloseTo(0.00, 3);
+    // Boundary vertex between sand road (45, 23) and forest (46, 23) must be graded to 0.00m (min road elevation)
+    // to prevent forest terrain quad from slicing through road asphalt!
+    expect(elevationReport.vertex46_23_y).toBeCloseTo(0.00, 3);
+
+    // 2. Southeast forest arterial roads sit flush on forest plinth at Y=0.10m
+    expect(elevationReport.forestRoads).toHaveLength(9);
+    for (const elev of elevationReport.forestRoads) {
+      expect(elev).toBeCloseTo(0.10, 3);
+    }
+
+    // 3. Road at (16, 92) near hills sits at 0.00m
+    expect(elevationReport.road16_92).toBeCloseTo(0.00, 3);
+
+    // 4. Road at (23, 57) on forest plinth sits at 0.10m
+    expect(elevationReport.road23_57).toBeCloseTo(0.10, 3);
+  });
 });
+

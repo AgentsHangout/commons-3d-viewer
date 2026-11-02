@@ -353,6 +353,26 @@ async function init() {
   }
 }
 
+function getTerrainElevation(char) {
+  if (char === 'h') return 0.60;
+  if (char === 'f') return 0.10;
+  if (char === 'w') return -0.25;
+  return 0.00;
+}
+
+function getRoadElevation(x, y, item, land) {
+  if (item && typeof item.elevation === 'number') {
+    return item.elevation;
+  }
+  if (item && typeof item.level === 'number' && item.level > 0) {
+    return item.level * 0.20;
+  }
+  const char = (land[y] && land[y][x]) ? land[y][x] : 'g';
+  if (char === 'h') return 0.60;
+  if (char === 'f') return 0.10;
+  return 0.00;
+}
+
 function buildWorld(data) {
   interactiveObjects.length = 0;
 
@@ -366,12 +386,14 @@ function buildWorld(data) {
 
   const builtGrid = Array.from({ length: size }, () => new Array(size).fill(null));
   const roadGrid = Array.from({ length: size }, () => new Uint8Array(size));
+  const roadElevationGrid = Array.from({ length: size }, () => new Float32Array(size).fill(NaN));
 
   built.forEach(item => {
     if (inBounds(item.x, item.y)) {
       builtGrid[item.y][item.x] = item;
       if (item.kind === 'road') {
         roadGrid[item.y][item.x] = 1;
+        roadElevationGrid[item.y][item.x] = getRoadElevation(item.x, item.y, item, land);
       }
     }
   });
@@ -389,18 +411,42 @@ function buildWorld(data) {
   const colorHelper = new THREE.Color();
 
   for (let i = 0; i < count; i++) {
-    const x = Math.min(Math.floor(terrainGeo.attributes.position.getX(i)), size - 1);
-    const z = Math.min(Math.floor(terrainGeo.attributes.position.getZ(i)), size - 1);
-    const char = (land[z] && land[z][x]) ? land[z][x] : 'g';
-    colorHelper.setHex(TERRAIN_PALETTE[char] || TERRAIN_PALETTE.g);
+    const vx = Math.min(Math.max(Math.round(terrainGeo.attributes.position.getX(i)), 0), size);
+    const vz = Math.min(Math.max(Math.round(terrainGeo.attributes.position.getZ(i)), 0), size);
+
+    // Up to 4 quadrant tiles sharing vertex (vx, vz)
+    const adjacentTiles = [
+      { x: vx - 1, z: vz - 1 },
+      { x: vx,     z: vz - 1 },
+      { x: vx - 1, z: vz     },
+      { x: vx,     z: vz     }
+    ].filter(t => inBounds(t.x, t.z));
+
+    const touchingRoads = adjacentTiles.filter(t => roadGrid[t.z][t.x] === 1);
 
     let y = 0;
-    if (char === 'w') y = -0.25;
-    else if (char === 'h') y = 0.6;
-    else if (char === 'f') y = 0.1;
+    if (touchingRoads.length > 0) {
+      let minRoadY = Infinity;
+      for (const r of touchingRoads) {
+        const elev = roadElevationGrid[r.z][r.x];
+        if (elev < minRoadY) minRoadY = elev;
+      }
+      y = minRoadY;
+    } else {
+      const sampleX = Math.min(vx, size - 1);
+      const sampleZ = Math.min(vz, size - 1);
+      const char = (land[sampleZ] && land[sampleZ][sampleX]) ? land[sampleZ][sampleX] : 'g';
+      y = getTerrainElevation(char);
+    }
+
     terrainGeo.attributes.position.setY(i, y);
 
-    colors[i * 3] = colorHelper.r;
+    const colorX = Math.min(vx, size - 1);
+    const colorZ = Math.min(vz, size - 1);
+    const tileChar = (land[colorZ] && land[colorZ][colorX]) ? land[colorZ][colorX] : 'g';
+    colorHelper.setHex(TERRAIN_PALETTE[tileChar] || TERRAIN_PALETTE.g);
+
+    colors[i * 3]     = colorHelper.r;
     colors[i * 3 + 1] = colorHelper.g;
     colors[i * 3 + 2] = colorHelper.b;
   }
@@ -445,9 +491,11 @@ function buildWorld(data) {
       : ((hasNorth ? 1 : 0) | (hasEast ? 2 : 0) | (hasSouth ? 4 : 0) | (hasWest ? 8 : 0));
     const tileConfig = ROAD_AUTOTILE_TABLE[mask] || { model: 'road_straight', rot: 0 };
 
+    const roadY = roadElevationGrid[y][x];
+
     roadTransforms[tileConfig.model].push({
       x: x + 0.5,
-      y: 0,
+      y: roadY,
       z: y + 0.5,
       rot: tileConfig.rot,
       meta: {
@@ -476,7 +524,7 @@ function buildWorld(data) {
       iMesh.castShadow = false;
       const dummy = new THREE.Object3D();
       transforms.forEach((t, i) => {
-        dummy.position.set(t.x, 0.04, t.z);
+        dummy.position.set(t.x, t.y + 0.04, t.z);
         dummy.rotation.y = t.rot;
         dummy.updateMatrix();
         iMesh.setMatrixAt(i, dummy.matrix);
@@ -511,6 +559,12 @@ function buildWorld(data) {
     const { x, y, kind } = item;
     if (kind === 'road') return;
 
+    const buildingY = (typeof item.elevation === 'number')
+      ? item.elevation
+      : ((typeof item.level === 'number' && item.level > 0)
+          ? item.level * 0.20
+          : getTerrainElevation((land[y] && land[y][x]) ? land[y][x] : 'g'));
+
     const meta = {
       x, y, kind,
       neighborhood: getNeighborhood(x, y, neighborhoods),
@@ -519,7 +573,7 @@ function buildWorld(data) {
 
     if (kind === 'cleared') {
       boxTransforms.push({
-        x: x + 0.5, y: 0.01, z: y + 0.5, rot: 0,
+        x: x + 0.5, y: buildingY + 0.01, z: y + 0.5, rot: 0,
         sx: 0.98, sy: 0.02, sz: 0.98, color: 0x5a4832, meta
       });
       return;
@@ -527,7 +581,7 @@ function buildWorld(data) {
 
     if (kind === 'green') {
       boxTransforms.push({
-        x: x + 0.5, y: 0.02, z: y + 0.5, rot: 0,
+        x: x + 0.5, y: buildingY + 0.02, z: y + 0.5, rot: 0,
         sx: 0.98, sy: 0.04, sz: 0.98, color: 0x2e7d32, meta
       });
       return;
@@ -535,7 +589,7 @@ function buildWorld(data) {
 
     if (kind === 'square') {
       boxTransforms.push({
-        x: x + 0.5, y: 0.02, z: y + 0.5, rot: 0,
+        x: x + 0.5, y: buildingY + 0.02, z: y + 0.5, rot: 0,
         sx: 0.98, sy: 0.04, sz: 0.98, color: 0x90a4ae, meta
       });
       return;
@@ -578,15 +632,15 @@ function buildWorld(data) {
     }
 
     if (kind === 'house' && loadedModels['cabin']) {
-      glbBuildingTransforms.cabin.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.140, meta });
+      glbBuildingTransforms.cabin.push({ x: posX, y: buildingY, z: posZ, rot: rotationY, scale: 0.140, meta });
     } else if (kind === 'studio' && loadedModels['studio']) {
-      glbBuildingTransforms.studio.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.130, meta });
+      glbBuildingTransforms.studio.push({ x: posX, y: buildingY, z: posZ, rot: rotationY, scale: 0.130, meta });
     } else if (kind === 'workshop' && loadedModels['workshop']) {
-      glbBuildingTransforms.workshop.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.145, meta });
+      glbBuildingTransforms.workshop.push({ x: posX, y: buildingY, z: posZ, rot: rotationY, scale: 0.145, meta });
     } else {
       const h = 0.8 + ((x * 13 + y * 7) % 6) * 0.2;
       boxTransforms.push({
-        x: posX, y: h / 2, z: posZ, rot: rotationY,
+        x: posX, y: buildingY + h / 2, z: posZ, rot: rotationY,
         sx: 0.65, sy: h, sz: 0.65,
         color: BUILDING_COLORS[kind] || 0x777777,
         meta
@@ -806,7 +860,10 @@ function buildWorld(data) {
       getDrawCalls: () => renderer.info.render.calls,
       getInfo: () => ({ ...renderer.info.render }),
       getTreeCount: () => generatedTreeTransforms.length,
-      getFirstTree: () => generatedTreeTransforms[0] ? { x: generatedTreeTransforms[0].x, z: generatedTreeTransforms[0].z, scale: generatedTreeTransforms[0].scale } : null
+      getFirstTree: () => generatedTreeTransforms[0] ? { x: generatedTreeTransforms[0].x, z: generatedTreeTransforms[0].z, scale: generatedTreeTransforms[0].scale } : null,
+      getTerrainMesh: () => terrainMesh,
+      getRoadTransforms: () => roadTransforms,
+      getRoadElevation: (x, y) => roadElevationGrid[y] ? roadElevationGrid[y][x] : undefined
     };
   }
 }
