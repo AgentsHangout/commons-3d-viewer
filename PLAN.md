@@ -238,8 +238,8 @@ To eliminate cascading row-order dependencies where tile (0, 0) dictates the ent
    - Full $360^\circ$ rotation: `rot: rng() * Math.PI * 2`.
 3. **Organic Jitter & Scale**:
    - Candidate offset inside tile:
-     $posX = tx + 0.5 + (rng() - 0.5) \times 0.45$
-     $posZ = tz + 0.5 + (rng() - 0.5) \times 0.45$
+     $posX = tx + 0.5 + (rng() - 0.5) \times 0.70$
+     $posZ = tz + 0.5 + (rng() - 0.5) \times 0.70$
    - Scale jitter:
      $scale = minScale + rng() \times (maxScale - minScale)$
      Strictly clamped in range `[0.140, 0.240]`.
@@ -269,9 +269,9 @@ To eliminate cascading row-order dependencies where tile (0, 0) dictates the ent
 2. **Bounding Sphere Recomputation**:
    Must call `iMesh.instanceMatrix.needsUpdate = true` and `iMesh.computeBoundingSphere()` after the transform loop. Otherwise, Three.js camera frustum culling will clip large sections of the forest when the camera rotates.
 3. **Deterministic PRNG**:
-   Must exclusively use `createSeededRandom(12345)`. Never use `Math.random()`, which breaks snapshot testing and causes CI jitter.
+   Seeds per tile using spatial coordinate hash `((x * 73856093) ^ (z * 19349663) ^ 12345) >>> 0` with `createSeededRandom(tileSeed)`. Never use unseeded `Math.random()`, which causes snapshot drift.
 4. **Spatial Hash Grid Sizing**:
-   The spatial lookup grid for Poisson spacing must use `const cellSize = minDist`. Bounds check `gx >= 0 && gx < gridDim && gz >= 0 && gz < gridDim` before array indexing to prevent out-of-bounds `TypeError`.
+   The spatial lookup grid uses `const cellSize = 1.4;` with an array bucket per cell (`treeGrid[gz][gx] = []`) searched over `[-2, 2]` neighboring cells (`2.8m`), completely covering the maximum candidate spacing (`2.0m`) without candidate overwrite. Bounds check `cx >= 0 && cx < gridDim && cz >= 0 && cz < gridDim` before array indexing.
 
 ---
 
