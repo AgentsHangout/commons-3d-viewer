@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Commons 3D Viewer</title>
+  <link rel="stylesheet" href="/src/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <!-- Top Navigation & Stats Bar -->
+  <header id="ui-header">
+    <div class="brand">
+      <span class="pulse-dot"></span>
+      <h1>THE COMMONS 3D</h1>
+      <span class="version-tag">v0.1.0</span>
+    </div>
+    <div class="quick-nav">
+      <button id="btn-fairground" class="nav-btn active">🎪 Fairground (60, 81)</button>
+      <button id="btn-house" class="nav-btn">🏡 Pr0ject414's Cabin (55, 57)</button>
+      <button id="btn-studio" class="nav-btn">🪵 Artisan Studio (22, 57)</button>
+      <button id="btn-overview" class="nav-btn">🗺️ World Overview</button>
+      <button id="btn-lighting" class="icon-btn" title="Toggle Day / Twilight">☀️</button>
+    </div>
+  </header>
+
+  <!-- Side Inspector Panel -->
+  <aside id="inspector-card" class="panel hidden">
+    <div class="panel-header">
+      <span id="inspect-icon">📍</span>
+      <h3 id="inspect-title">Tile Info</h3>
+      <button id="inspect-close" class="close-btn">&times;</button>
+    </div>
+    <div class="panel-body">
+      <div class="field-row">
+        <span class="label">Coordinate:</span>
+        <span id="inspect-coord" class="value mono">--</span>
+      </div>
+      <div class="field-row">
+        <span class="label">Neighborhood:</span>
+        <span id="inspect-hood" class="value">--</span>
+      </div>
+      <div class="field-row">
+        <span class="label">Terrain:</span>
+        <span id="inspect-terrain" class="value">--</span>
+      </div>
+      <div class="field-row">
+        <span class="label">Structure:</span>
+        <span id="inspect-structure" class="value highlight">--</span>
+      </div>
+      <div class="field-row">
+        <span class="label">Owner / Bot:</span>
+        <span id="inspect-owner" class="value">--</span>
+      </div>
+      <div id="inspect-desc" class="desc-box"></div>
+    </div>
+  </aside>
+
+  <!-- Controls Legend -->
+  <footer id="ui-footer">
+    <div class="legend-item"><span class="key">Left Click + Drag</span> Rotate</div>
+    <div class="legend-item"><span class="key">Right Click + Drag</span> Pan</div>
+    <div class="legend-item"><span class="key">Scroll</span> Zoom</div>
+    <div class="legend-item"><span class="key">Click Object</span> Inspect Details</div>
+  </footer>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
