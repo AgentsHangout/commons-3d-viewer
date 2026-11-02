@@ -228,7 +228,7 @@ test.describe('Commons draw-call budget', () => {
     expect(report.road45_23).toBeCloseTo(0.00, 3);
     expect(report.vertex46_23_y).toBeCloseTo(0.00, 3);
   });
-  test('double-sided materials, glass transparency, and PBR road parameters satisfy Section 13', async ({ page }) => {
+  test('tri-stream primitive consolidation, double-sided materials, and glass transparency satisfy Section 15', async ({ page }) => {
     await page.goto('/?perf');
     await page.waitForFunction(() => window.__sceneReady === true, null, {
       timeout: SCENE_READY_TIMEOUT_MS
@@ -270,17 +270,23 @@ test.describe('Commons draw-call budget', () => {
     expect(report, 'perf inspection unavailable').not.toBeNull();
     const { modelsInfo, calls } = report;
 
-    // 1. Double-Sided Material Invariant (THREE.DoubleSide === 2)
+    // 1. Tri-Stream Side Verification
     const requiredModels = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
     for (const key of requiredModels) {
       expect(modelsInfo[key], `expected model ${key} to be loaded`).toBeDefined();
-      const opaqueMesh = modelsInfo[key].find((m) => !m.transparent);
-      expect(opaqueMesh, `expected opaque mesh in model ${key}`).toBeDefined();
-      expect(opaqueMesh.side, `opaque material in ${key} must have DoubleSide`).toBe(2);
-      expect(opaqueMesh.shadowSide, `opaque material in ${key} must have DoubleSide shadowSide`).toBe(2);
+      const opaqueMeshes = modelsInfo[key].filter((m) => !m.transparent);
+      expect(opaqueMeshes.length, `model ${key} must have at least one opaque mesh`).toBeGreaterThan(0);
+      for (const m of opaqueMeshes) {
+        // Each opaque mesh must strictly be FrontSide (0) or DoubleSide (2)
+        expect([0, 2]).toContain(m.side);
+        expect(m.shadowSide).toBe(m.side);
+      }
+      // Production double-sided models must contain a DoubleSide mesh
+      const doubleMesh = opaqueMeshes.find((m) => m.side === 2);
+      expect(doubleMesh, `model ${key} must have DoubleSide mesh for thin geometry/foliage`).toBeDefined();
     }
 
-    // 2. Glass Transparency Verification for Studio and Workshop
+    // 2. Glass Stream Verification for Studio and Workshop
     const studioGlass = modelsInfo['studio']?.find((m) => m.transparent);
     expect(studioGlass, 'studio must have a transparent glass mesh').toBeDefined();
     expect(studioGlass.opacity, 'studio glass opacity must be <= 0.5').toBeLessThanOrEqual(0.5);
@@ -303,7 +309,7 @@ test.describe('Commons draw-call budget', () => {
       expect(Math.abs(roadMesh.roughness - straightRoughness)).toBeLessThanOrEqual(0.05);
     }
 
-    // 4. Draw-Call Ceiling Check (nominal 14, strictly <= 20)
+    // 4. Draw-Call Ceiling Check (nominal 14-17, strictly <= 20)
     expect(calls).toBeLessThanOrEqual(20);
   });
 });

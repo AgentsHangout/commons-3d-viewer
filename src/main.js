@@ -131,7 +131,8 @@ const loadedModels = {};
  */
 function collapseGltfToSingleMesh(gltfScene, key = '') {
   gltfScene.updateMatrixWorld(true);
-  const opaqueParts = [];
+  const frontParts = [];
+  const doubleParts = [];
   const glassParts = [];
 
   let totalVerts = 0;
@@ -139,7 +140,6 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
   let totalMetalness = 0;
   let primaryTexture = null;
   let anyHasUV = false;
-  let anyDoubleSided = false;
 
   // 1. First pass: inspect UV attributes
   gltfScene.traverse((child) => {
@@ -153,22 +153,20 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
   // - Workshop: 'Workshop_Window_Glass'
   const isGlassPrimitive = (mat, name) => {
     if (!mat) return false;
+    const n = (mat.name || '').toLowerCase();
+    const cn = (name || '').toLowerCase();
+    if (n.includes('glow') || n.includes('lamp') || cn.includes('glow') || cn.includes('lamp')) return false;
     if (mat.alphaMode === 'BLEND') return true;
     if (typeof mat.opacity === 'number' && mat.opacity < 0.95) return true;
-    const n = (mat.name || '').toLowerCase() + ' ' + (name || '').toLowerCase();
-    if (n.includes('glow') || n.includes('lamp')) return false;
-    return /glass|window|glazing|transp/i.test(n);
+    return n === 'studio_glass' || n === 'workshop_window_glass' || cn === 'studio_glass' || cn === 'workshop_window_glass';
   };
 
-  // 2. Second pass: partition into opaque vs glass
+  // 2. Second pass: partition into front, double, vs glass
   gltfScene.traverse((child) => {
     if (!child.isMesh || !child.geometry) return;
     const mat = Array.isArray(child.material) ? child.material[0] : child.material;
     const isGlass = isGlassPrimitive(mat, child.name);
-
-    if (!isGlass && mat && mat.side === THREE.DoubleSide) {
-      anyDoubleSided = true;
-    }
+    const isDoubleSided = !isGlass && Boolean(mat && (mat.side === THREE.DoubleSide || mat.doubleSided === true));
 
     const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
     const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;
@@ -220,71 +218,91 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
     slim.setAttribute('color', new THREE.Float32BufferAttribute(colorArr, 3));
     if (isGlass) {
       glassParts.push(slim);
+    } else if (isDoubleSided) {
+      doubleParts.push(slim);
     } else {
-      opaqueParts.push(slim);
+      frontParts.push(slim);
     }
   });
 
-  if (opaqueParts.length === 0 && glassParts.length === 0) return gltfScene;
+  if (frontParts.length === 0 && doubleParts.length === 0 && glassParts.length === 0) {
+    return gltfScene;
+  }
 
-  const mergedOpaque = opaqueParts.length > 0 ? mergeGeometries(opaqueParts, false) : null;
+  const mergedFront = frontParts.length > 0 ? mergeGeometries(frontParts, false) : null;
+  const mergedDouble = doubleParts.length > 0 ? mergeGeometries(doubleParts, false) : null;
   const mergedGlass = glassParts.length > 0 ? mergeGeometries(glassParts, false) : null;
 
-  // Unified geometric grounding: compute combined minY
+  // Unified geometric grounding: compute combined minY across all parts
   let minY = Infinity;
-  if (mergedOpaque) {
-    mergedOpaque.computeBoundingBox();
-    if (mergedOpaque.boundingBox) minY = Math.min(minY, mergedOpaque.boundingBox.min.y);
-  }
-  if (mergedGlass) {
-    mergedGlass.computeBoundingBox();
-    if (mergedGlass.boundingBox) minY = Math.min(minY, mergedGlass.boundingBox.min.y);
+  for (const g of [mergedFront, mergedDouble, mergedGlass]) {
+    if (g) {
+      g.computeBoundingBox();
+      if (g.boundingBox) minY = Math.min(minY, g.boundingBox.min.y);
+    }
   }
   if (!Number.isFinite(minY)) minY = 0;
 
   if (Math.abs(minY) > 0.001) {
-    if (mergedOpaque) mergedOpaque.translate(0, -minY, 0);
+    if (mergedFront) mergedFront.translate(0, -minY, 0);
+    if (mergedDouble) mergedDouble.translate(0, -minY, 0);
     if (mergedGlass) mergedGlass.translate(0, -minY, 0);
   }
 
-  if (mergedOpaque) {
-    mergedOpaque.computeBoundingBox();
-    mergedOpaque.computeBoundingSphere();
-    if (!mergedOpaque.attributes.normal) mergedOpaque.computeVertexNormals();
-  }
-  if (mergedGlass) {
-    mergedGlass.computeBoundingBox();
-    mergedGlass.computeBoundingSphere();
-    if (!mergedGlass.attributes.normal) mergedGlass.computeVertexNormals();
+  for (const g of [mergedFront, mergedDouble, mergedGlass]) {
+    if (g) {
+      g.computeBoundingBox();
+      g.computeBoundingSphere();
+      if (!g.attributes.normal) g.computeVertexNormals();
+    }
   }
 
   const group = new THREE.Group();
 
-  // Create opaque mesh
-  if (mergedOpaque) {
-    const isRoad = (key && key.startsWith('road')) ||
-      (gltfScene.name && gltfScene.name.toLowerCase().includes('road'));
-    const avgRoughness = isRoad ? 0.75 : (totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75);
-    const avgMetalness = isRoad ? 0.05 : (totalVerts > 0 ? (totalMetalness / totalVerts) : 0.05);
+  const isRoad = (key && key.startsWith('road')) ||
+    (gltfScene.name && gltfScene.name.toLowerCase().includes('road'));
+  const avgRoughness = isRoad ? 0.75 : (totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75);
+  const avgMetalness = isRoad ? 0.05 : (totalVerts > 0 ? (totalMetalness / totalVerts) : 0.05);
 
-    const opaqueMat = new THREE.MeshStandardMaterial({
+  // 1. Opaque FrontSide mesh (if any)
+  if (mergedFront) {
+    const frontMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
       roughness: avgRoughness,
       metalness: avgMetalness,
-      side: anyDoubleSided ? THREE.DoubleSide : THREE.FrontSide,
-      shadowSide: anyDoubleSided ? THREE.DoubleSide : THREE.FrontSide,
+      side: THREE.FrontSide,
+      shadowSide: THREE.FrontSide,
       transparent: false,
       depthWrite: true
     });
-    if (primaryTexture) opaqueMat.map = primaryTexture;
+    if (primaryTexture) frontMat.map = primaryTexture;
 
-    const opaqueMesh = new THREE.Mesh(mergedOpaque, opaqueMat);
-    opaqueMesh.castShadow = true;
-    opaqueMesh.receiveShadow = true;
-    group.add(opaqueMesh);
+    const frontMesh = new THREE.Mesh(mergedFront, frontMat);
+    frontMesh.castShadow = true;
+    frontMesh.receiveShadow = true;
+    group.add(frontMesh);
   }
 
-  // Create glass mesh
+  // 2. Opaque DoubleSide mesh (if any)
+  if (mergedDouble) {
+    const doubleMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: avgRoughness,
+      metalness: avgMetalness,
+      side: THREE.DoubleSide,
+      shadowSide: THREE.DoubleSide,
+      transparent: false,
+      depthWrite: true
+    });
+    if (primaryTexture) doubleMat.map = primaryTexture;
+
+    const doubleMesh = new THREE.Mesh(mergedDouble, doubleMat);
+    doubleMesh.castShadow = true;
+    doubleMesh.receiveShadow = true;
+    group.add(doubleMesh);
+  }
+
+  // 3. Glass mesh (if any)
   if (mergedGlass) {
     const glassMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(0.85, 0.92, 0.98),
