@@ -161,12 +161,36 @@ function collapseGltfToSingleMesh(gltfScene, key = '') {
     return n === 'studio_glass' || n === 'workshop_window_glass' || cn === 'studio_glass' || cn === 'workshop_window_glass';
   };
 
+  // Helper: detect if a primitive is thin open geometry requiring DoubleSide
+  const isExplicitDoubleSided = (mat, meshName) => {
+    if (!mat) return false;
+    // If authoring explicitly disabled doubleSided, strictly respect FrontSide!
+    if (mat.doubleSided === false || mat.side === THREE.FrontSide) return false;
+
+    const m = (mat.name || '').toLowerCase();
+    const n = (meshName || '').toLowerCase();
+
+    // Thin open foliage shells
+    if (m.includes('needles') || n.includes('needle') || n.includes('tier')) return true;
+    // Thin roof eaves and shingles
+    if (m.includes('roof_cedar') || n.includes('shingle')) return true;
+    // Corrugated roof sheet overhangs
+    if (m.includes('roof_corrugated')) return true;
+    // Thin steel canopy overhangs and succulent foliage
+    if ((m.includes('roof_dark') && n.includes('roof')) || m.includes('foliage') || n.includes('succulent')) return true;
+    // Porch brackets and trim
+    if (m.includes('trim_dark') && n.includes('bracket')) return true;
+
+    // Closed polyhedra (logs, stone, brick, foundations, road slabs) default to FrontSide!
+    return false;
+  };
+
   // 2. Second pass: partition into front, double, vs glass
   gltfScene.traverse((child) => {
     if (!child.isMesh || !child.geometry) return;
     const mat = Array.isArray(child.material) ? child.material[0] : child.material;
     const isGlass = isGlassPrimitive(mat, child.name);
-    const isDoubleSided = !isGlass && Boolean(mat && (mat.side === THREE.DoubleSide || mat.doubleSided === true));
+    const isDoubleSided = !isGlass && isExplicitDoubleSided(mat, child.name);
 
     const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
     const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;

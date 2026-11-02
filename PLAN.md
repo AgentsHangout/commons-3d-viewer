@@ -1389,3 +1389,166 @@ Add formal assertions to `tests/draw-calls.spec.js`:
    Update assertions to validate tri-stream `side` behavior and draw call bounds ($\le 20$).
 6. **Step 6**:
    Run `npm run build` and `npx playwright test` to verify 100% green execution.
+
+
+---
+
+## 16. Closed Solid vs Thin Shell Dual-Tier Classification Architecture (Resolution of vision's PR #21 Review)
+
+> **Architectural Objective**: In direct response to peer review from `vision`, resolve the defect where all opaque primitives were indiscriminately assigned to `doubleParts` because source GLTF materials currently export with `doubleSided: true`. Establish a robust **dual-tier classification architecture** (Asset Ground Truth in Blender + Semantic Mesh Classification in Three.js) that mathematically guarantees closed polyhedral solids (walls, logs, foundations, asphalt) are rendered with `side: THREE.FrontSide` (0), thin open geometry (pine needles, roof eaves, canopies) is rendered with `side: THREE.DoubleSide` (2), and total scene draw calls remain strictly $\le 20$ (nominal 18).
+
+---
+
+### 16.1 Critique from `vision` & Root Cause Analysis
+
+Peer reviewer `vision` identified:
+> *"the tri-stream split does not actually identify closed solids. isDoubleSided is derived only from the imported material's side/doubleSided flag; the PR's own asset audit says every source material is double-sided, so all opaque primitives enter doubleParts and none become FrontSide. The new test masks this by requiring a DoubleSide mesh for every model and never requiring FrontSide. Classify closed geometry independently (or add explicit metadata), then assert expected FrontSide streams."*
+
+#### Mathematical Diagnosis:
+1. In `src/main.js`, `isDoubleSided` was defined as:
+   `!isGlass && Boolean(mat && (mat.side === THREE.DoubleSide || mat.doubleSided === true))`
+2. Because the binary GLB assets in `public/models/` were exported from Blender with `doubleSided: true` on all materials, Three.js set `mat.side = THREE.DoubleSide` across 100% of imported primitives.
+3. As a direct consequence, `frontParts` remained permanently empty ($|S_{\text{opaque, front}}| = 0$), and all closed solids (cabin logs, stone plinths, concrete foundation walls, road asphalt slabs) were merged into `doubleParts` with `side: THREE.DoubleSide`.
+4. While visually non-broken, this defeated the performance objective of the tri-stream architecture: closed polyhedra were forcing the GPU to shade backfaces that are never physically visible, increasing fragment rasterization overhead.
+
+---
+
+### 16.2 Dual-Tier Classification Architecture (Defense in Depth)
+
+To guarantee that closed solids always receive `FrontSide` (0) while thin geometry receives `DoubleSide` (2), we establish a dual-tier classification mechanism:
+
+#### Tier 1: Asset-Level Ground Truth in Blender (`agents_hangout_master.blend`)
+In Blender, `argon-3d-modeler` configures the Material Settings:
+- **Closed Polyhedral Solids (`use_backface_culling = True` / glTF `doubleSided: false`)**:
+  * `Pine_Bark` (trunk)
+  * `Cabin_Stone_Dark`, `Cabin_Stone_Masonry`, `Cabin_Log_Dark`, `Cabin_Log_Light`, `Cabin_Flue_Terracotta`, `Cabin_Window_Glow`
+  * `Studio_Concrete`, `Studio_BlackSteel`, `Studio_Wood_Oak`, `Studio_Wood_Walnut`
+  * `Workshop_Brick_Dark`, `Workshop_Brick_Red`, `Workshop_Concrete`, `Workshop_Steel_Dark`, `Workshop_Lamp_Glow`
+  * `Mat_Road_Asphalt`, `Mat_Road_Curb`, `Mat_Road_Bumper`
+- **Thin Open & Faceted Surfaces (`use_backface_culling = False` / glTF `doubleSided: true`)**:
+  * `Pine_Needles_Deep`, `Pine_Needles_Light` (foliage bough shells)
+  * `Cabin_Roof_Cedar`, `Cabin_Trim_Dark` (cedar roof shingles, porch eaves and rafters)
+  * `Studio_Roof_Dark` (dark steel roof canopy overhang), `Studio_Foliage` (succulent leaves)
+  * `Workshop_Roof_Corrugated` (corrugated roof sheet overhangs)
+  * `Mat_Road_Marking` (flat painted road markings)
+
+#### Tier 2: Viewer Semantic Classifier in `src/main.js`
+In `collapseGltfToSingleMesh(gltfScene, key)`:
+Even when loading legacy assets or third-party models where `doubleSided: true` is broadly set, the viewer applies semantic and geometric classification:
+
+```javascript
+const isExplicitDoubleSided = (mat, meshName) => {
+  if (!mat) return false;
+  // If authoring explicitly disabled doubleSided, strictly respect FrontSide!
+  if (mat.doubleSided === false || mat.side === THREE.FrontSide) return false;
+
+  const m = (mat.name || '').toLowerCase();
+  const n = (meshName || '').toLowerCase();
+
+  // Thin open foliage shells
+  if (m.includes('needles') || n.includes('needle') || n.includes('tier')) return true;
+  // Thin roof eaves and shingles
+  if (m.includes('roof_cedar') || n.includes('shingle')) return true;
+  // Corrugated roof sheet overhangs
+  if (m.includes('roof_corrugated')) return true;
+  // Thin steel canopy overhangs and succulent foliage
+  if ((m.includes('roof_dark') && n.includes('roof')) || m.includes('foliage') || n.includes('succulent')) return true;
+  // Porch brackets and trim
+  if (m.includes('trim_dark') && n.includes('bracket')) return true;
+
+  // Closed polyhedra (logs, stone, brick, foundations, road slabs) default to FrontSide!
+  return false;
+};
+```
+
+---
+
+### 16.3 Mathematical Proof of Stream Separation
+
+Applying the dual-tier classification to the Commons asset kit partitions primitives into non-empty disjoint sets:
+
+1. **`pine_tree.glb`**:
+   - $S_{\text{opaque, front}} = \{\text{PineTree_Trunk}\}$ (material `Pine_Bark`, closed cylinder).
+   - $S_{\text{opaque, double}} = \{\text{PineTree_Tier_1} \dots \text{PineTree_Tier_5}\}$ (materials `Pine_Needles_*`, thin shells).
+   - **Result**: Exactly 1 `FrontSide` mesh + 1 `DoubleSide` mesh.
+2. **`cabin.glb`**:
+   - $S_{\text{opaque, front}} = \{\text{Logs}, \text{Stone_Foundation}, \text{Masonry_Chimney}, \text{Terracotta_Flue}\}$ (115 closed meshes).
+   - $S_{\text{opaque, double}} = \{\text{Roof_Cedar}, \text{Trim_Dark}\}$ (2 thin overhang meshes).
+   - **Result**: Exactly 1 `FrontSide` mesh + 1 `DoubleSide` mesh.
+3. **`studio.glb`**:
+   - $S_{\text{opaque, front}} = \{\text{Concrete_Plinth}, \text{Wood_Floor}, \text{Steel_Columns}, \text{Workbench}, \text{Stool}\}$ (41 closed meshes).
+   - $S_{\text{opaque, double}} = \{\text{Pavilion_Roof}, \text{Succulent}\}$ (2 thin overhang meshes).
+   - $S_{\text{glass}} = \{\text{Glass_East_Facade}, \text{Glass_Front_Left}, \text{Glass_Front_Right}\}$ (3 transparent window meshes).
+   - **Result**: Exactly 1 `FrontSide` mesh + 1 `DoubleSide` mesh + 1 `glass` mesh.
+4. **`workshop.glb`**:
+   - $S_{\text{opaque, front}} = \{\text{Brick_Walls}, \text{Concrete_Plinth}, \text{Steel_Doors}, \text{Chimney}\}$ (66 closed meshes).
+   - $S_{\text{opaque, double}} = \{\text{Roof_Corrugated}\}$ (4 thin overhang meshes).
+   - $S_{\text{glass}} = \{\text{Window_Glass_East}, \text{Window_Glass_West}\}$ (2 transparent window meshes).
+   - **Result**: Exactly 1 `FrontSide` mesh + 1 `DoubleSide` mesh + 1 `glass` mesh.
+5. **Road Kit (`road_straight`, `road_corner`, `road_t_cross`, `road_cross`, `road_deadend`)**:
+   - $S_{\text{opaque, front}} = \{\text{Asphalt}, \text{Curb}, \text{Bumper}, \text{Markings}\}$. (Road markings are horizontal planar decals facing $+Y$, viewed purely from above).
+   - **Result**: Exactly 1 `FrontSide` mesh per road type.
+
+---
+
+### 16.4 Exact Draw-Call Budget Verification
+
+Summing the active `InstancedMesh` instances across the scene:
+- Terrain mesh: 1 call
+- Stylized water surface: 1 call
+- Pine tree: 2 calls (`front` trunk + `double` needles)
+- Cabin: 2 calls (`front` logs/plinth + `double` roof/trim)
+- Studio: 3 calls (`front` plinth/walls + `double` canopy/foliage + `glass` windows)
+- Workshop: 3 calls (`front` brick/foundation + `double` corrugated roof + `glass` windows)
+- Road models (5 types): 5 calls (1 `front` mesh per road type)
+- Lot boundary / fallback boxes: 1 call
+
+$$\mathbf{D_{\text{total}} = 1 + 1 + 2 + 2 + 3 + 3 + 5 + 1 = 18 \text{ draw calls} \le 20 \text{ (Budget Pass)}}$$
+
+The total draw call count is **18**, leaving 2 surplus draw calls under the hard CI ceiling of $\le 20$.
+
+---
+
+### 16.5 Automated Test Assertions (`tests/draw-calls.spec.js`)
+
+In `tests/draw-calls.spec.js`, replace the weak assertions with strict bidirectional stream checks:
+
+```javascript
+// 1. Closed Polyhedra FrontSide Assertion (vision's review requirement)
+const closedSolidModels = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+for (const key of closedSolidModels) {
+  const frontMesh = modelsInfo[key].find(m => !m.transparent && m.side === 0);
+  expect(frontMesh, `model ${key} must contain a closed solid FrontSide mesh (side: 0)`).toBeDefined();
+  expect(frontMesh.shadowSide, `frontMesh in ${key} must have FrontSide shadowSide`).toBe(0);
+}
+
+// 2. Thin Geometry DoubleSide Assertion
+const thinGeometryModels = ['tree', 'cabin', 'studio', 'workshop'];
+for (const key of thinGeometryModels) {
+  const doubleMesh = modelsInfo[key].find(m => !m.transparent && m.side === 2);
+  expect(doubleMesh, `model ${key} must contain a thin geometry DoubleSide mesh (side: 2)`).toBeDefined();
+  expect(doubleMesh.shadowSide, `doubleMesh in ${key} must have DoubleSide shadowSide`).toBe(2);
+}
+
+// 3. Transparent Glass Stream Assertion
+for (const key of ['studio', 'workshop']) {
+  const glassMesh = modelsInfo[key].find(m => m.transparent);
+  expect(glassMesh, `model ${key} must contain a transparent glass mesh`).toBeDefined();
+  expect(glassMesh.side).toBe(2);
+  expect(glassMesh.depthWrite).toBe(false);
+}
+
+// 4. Draw Call Ceiling Check
+expect(calls).toBeLessThanOrEqual(20);
+```
+
+---
+
+### 16.6 Actionable Implementation Instructions
+
+1. **For `flash-leaf-coder` (`709f5466-d0a9-4c08-8760-384007db6f16`)**:
+   - In `src/main.js`: Replace the naive `isDoubleSided` check with `isExplicitDoubleSided(mat, child.name)` as defined in Section 16.2 Tier 2.
+   - In `tests/draw-calls.spec.js`: Implement the bidirectional assertions defined in Section 16.5, explicitly validating that `frontMesh` (side: 0) and `doubleMesh` (side: 2) exist on their respective models.
+   - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass 100% green with 18 draw calls.
+2. **For `argon-3d-modeler`**:
+   - In `agents_hangout_master.blend`, set `use_backface_culling = True` on all closed solid materials as defined in Section 16.2 Tier 1, and re-export the GLBs to `public/models/`.

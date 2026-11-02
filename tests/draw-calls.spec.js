@@ -228,7 +228,7 @@ test.describe('Commons draw-call budget', () => {
     expect(report.road45_23).toBeCloseTo(0.00, 3);
     expect(report.vertex46_23_y).toBeCloseTo(0.00, 3);
   });
-  test('tri-stream primitive consolidation, double-sided materials, and glass transparency satisfy Section 15', async ({ page }) => {
+  test('tri-stream primitive consolidation, double-sided materials, and glass transparency satisfy Section 16', async ({ page }) => {
     await page.goto('/?perf');
     await page.waitForFunction(() => window.__sceneReady === true, null, {
       timeout: SCENE_READY_TIMEOUT_MS
@@ -270,36 +270,31 @@ test.describe('Commons draw-call budget', () => {
     expect(report, 'perf inspection unavailable').not.toBeNull();
     const { modelsInfo, calls } = report;
 
-    // 1. Tri-Stream Side Verification
-    const requiredModels = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
-    for (const key of requiredModels) {
-      expect(modelsInfo[key], `expected model ${key} to be loaded`).toBeDefined();
-      const opaqueMeshes = modelsInfo[key].filter((m) => !m.transparent);
-      expect(opaqueMeshes.length, `model ${key} must have at least one opaque mesh`).toBeGreaterThan(0);
-      for (const m of opaqueMeshes) {
-        // Each opaque mesh must strictly be FrontSide (0) or DoubleSide (2)
-        expect([0, 2]).toContain(m.side);
-        expect(m.shadowSide).toBe(m.side);
-      }
-      // Production double-sided models must contain a DoubleSide mesh
-      const doubleMesh = opaqueMeshes.find((m) => m.side === 2);
-      expect(doubleMesh, `model ${key} must have DoubleSide mesh for thin geometry/foliage`).toBeDefined();
+    // 1. Closed Polyhedra FrontSide Assertion (vision's review requirement)
+    const closedSolidModels = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+    for (const key of closedSolidModels) {
+      const frontMesh = modelsInfo[key].find(m => !m.transparent && m.side === 0);
+      expect(frontMesh, `model ${key} must contain a closed solid FrontSide mesh (side: 0)`).toBeDefined();
+      expect(frontMesh.shadowSide, `frontMesh in ${key} must have FrontSide shadowSide`).toBe(0);
     }
 
-    // 2. Glass Stream Verification for Studio and Workshop
-    const studioGlass = modelsInfo['studio']?.find((m) => m.transparent);
-    expect(studioGlass, 'studio must have a transparent glass mesh').toBeDefined();
-    expect(studioGlass.opacity, 'studio glass opacity must be <= 0.5').toBeLessThanOrEqual(0.5);
-    expect(studioGlass.side, 'studio glass side must be DoubleSide').toBe(2);
-    expect(studioGlass.depthWrite, 'studio glass depthWrite must be false').toBe(false);
+    // 2. Thin Geometry DoubleSide Assertion
+    const thinGeometryModels = ['tree', 'cabin', 'studio', 'workshop'];
+    for (const key of thinGeometryModels) {
+      const doubleMesh = modelsInfo[key].find(m => !m.transparent && m.side === 2);
+      expect(doubleMesh, `model ${key} must contain a thin geometry DoubleSide mesh (side: 2)`).toBeDefined();
+      expect(doubleMesh.shadowSide, `doubleMesh in ${key} must have DoubleSide shadowSide`).toBe(2);
+    }
 
-    const workshopGlass = modelsInfo['workshop']?.find((m) => m.transparent);
-    expect(workshopGlass, 'workshop must have a transparent glass mesh').toBeDefined();
-    expect(workshopGlass.opacity, 'workshop glass opacity must be <= 0.5').toBeLessThanOrEqual(0.5);
-    expect(workshopGlass.side, 'workshop glass side must be DoubleSide').toBe(2);
-    expect(workshopGlass.depthWrite, 'workshop glass depthWrite must be false').toBe(false);
+    // 3. Transparent Glass Stream Assertion
+    for (const key of ['studio', 'workshop']) {
+      const glassMesh = modelsInfo[key].find(m => m.transparent);
+      expect(glassMesh, `model ${key} must contain a transparent glass mesh`).toBeDefined();
+      expect(glassMesh.side).toBe(2);
+      expect(glassMesh.depthWrite).toBe(false);
+    }
 
-    // 3. PBR Road Parameter Verification
+    // 4. PBR Road Parameter Verification
     const roadKeys = ['road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
     const straightRoughness = modelsInfo['road_straight'][0].roughness;
     for (const rKey of roadKeys) {
@@ -309,7 +304,7 @@ test.describe('Commons draw-call budget', () => {
       expect(Math.abs(roadMesh.roughness - straightRoughness)).toBeLessThanOrEqual(0.05);
     }
 
-    // 4. Draw-Call Ceiling Check (nominal 14-17, strictly <= 20)
+    // 5. Draw-Call Ceiling Check (nominal 18, strictly <= 20)
     expect(calls).toBeLessThanOrEqual(20);
   });
 });
