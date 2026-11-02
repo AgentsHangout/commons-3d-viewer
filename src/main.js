@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 // Setup Renderer, Scene & Camera
 const container = document.getElementById('canvas-container');
@@ -101,21 +102,136 @@ const ROAD_AUTOTILE_TABLE = {
   15: { model: 'road_cross',    rot: 0 }               // Connects North + East + South + West (4-way)
 };
 
+// Seeded PRNG for deterministic placement
+function createSeededRandom(seed = 12345) {
+  let s = seed % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function() {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
 // GLTF Asset Cache & Loader
 const gltfLoader = new GLTFLoader();
 const loadedModels = {};
 
+/**
+ * Consolidate each GLB model's sub-meshes and primitives into a single BufferGeometry
+ * with baked vertex colors, preserved UVs, and model-accurate weighted PBR roughness/metalness.
+ * Models ship with multiple primitives (e.g. cabin.glb has 119 primitives).
+ * Collapsing to 1 geometry & 1 material allows rendering via a single THREE.InstancedMesh
+ * (1 draw call per model type), well under the strict CI budget.
+ */
+function collapseGltfToSingleMesh(gltfScene) {
+  gltfScene.updateMatrixWorld(true);
+  const parts = [];
+
+  let totalVerts = 0;
+  let totalRoughness = 0;
+  let totalMetalness = 0;
+  let primaryTexture = null;
+  let anyHasUV = false;
+
+  // First pass: inspect attributes across primitives
+  gltfScene.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    if (child.geometry.attributes.uv) {
+      anyHasUV = true;
+    }
+  });
+
+  // Second pass: clone, transform, bake vertex colors, and collect
+  gltfScene.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const mat = Array.isArray(child.material) ? child.material[0] : child.material;
+    const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
+    const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;
+    const metalness = (mat && typeof mat.metalness === 'number') ? mat.metalness : 0.05;
+
+    if (mat && mat.map && !primaryTexture) {
+      primaryTexture = mat.map;
+    }
+
+    let geo = child.geometry.clone();
+    if (geo.index) geo = geo.toNonIndexed();
+    geo.applyMatrix4(child.matrixWorld);
+
+    const count = geo.attributes.position.count;
+    totalVerts += count;
+    totalRoughness += roughness * count;
+    totalMetalness += metalness * count;
+
+    const colorArr = new Float32Array(count * 3);
+    const hasExistingColor = !!geo.attributes.color;
+    for (let i = 0; i < count; i++) {
+      if (hasExistingColor) {
+        colorArr[i * 3]     = geo.attributes.color.getX(i) * color.r;
+        colorArr[i * 3 + 1] = geo.attributes.color.getY(i) * color.g;
+        colorArr[i * 3 + 2] = geo.attributes.color.getZ(i) * color.b;
+      } else {
+        colorArr[i * 3]     = color.r;
+        colorArr[i * 3 + 1] = color.g;
+        colorArr[i * 3 + 2] = color.b;
+      }
+    }
+
+    const slim = new THREE.BufferGeometry();
+    slim.setAttribute('position', geo.attributes.position.clone());
+    if (geo.attributes.normal) {
+      slim.setAttribute('normal', geo.attributes.normal.clone());
+    } else {
+      slim.computeVertexNormals();
+    }
+
+    if (anyHasUV) {
+      if (geo.attributes.uv) {
+        slim.setAttribute('uv', geo.attributes.uv.clone());
+      } else {
+        slim.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(count * 2), 2));
+      }
+    }
+
+    slim.setAttribute('color', new THREE.Float32BufferAttribute(colorArr, 3));
+    parts.push(slim);
+  });
+
+  if (parts.length === 0) return gltfScene;
+
+  const merged = mergeGeometries(parts, false);
+  if (!merged) return gltfScene;
+  if (!merged.attributes.normal) merged.computeVertexNormals();
+
+  const avgRoughness = totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75;
+  const avgMetalness = totalVerts > 0 ? (totalMetalness / totalVerts) : 0.05;
+
+  const matConfig = {
+    vertexColors: true,
+    roughness: avgRoughness,
+    metalness: avgMetalness,
+    side: THREE.FrontSide
+  };
+  if (primaryTexture) {
+    matConfig.map = primaryTexture;
+  }
+
+  const mesh = new THREE.Mesh(
+    merged,
+    new THREE.MeshStandardMaterial(matConfig)
+  );
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+
+  const group = new THREE.Group();
+  group.add(mesh);
+  return group;
+}
+
 async function loadGlbModel(key, url) {
   try {
     const gltf = await gltfLoader.loadAsync(url);
-    gltf.scene.traverse((node) => {
-      if (node.isMesh) {
-        node.castShadow = true;
-        node.receiveShadow = true;
-      }
-    });
-    loadedModels[key] = gltf.scene;
-    console.log(`[GLTF] Successfully loaded ${key}`);
+    loadedModels[key] = collapseGltfToSingleMesh(gltf.scene);
+    console.log(`[GLTF] Successfully loaded and consolidated ${key}`);
   } catch (err) {
     console.warn(`[GLTF] Could not load model ${key} from ${url}`, err);
   }
@@ -135,33 +251,71 @@ async function loadAssets() {
   ]);
 }
 
-// Helper to create InstancedMesh group for modular roads
-function createInstancedRoads(gltfScene, transformsList) {
+function createInstancedFromGltf(gltfScene, transformsList, options = {}) {
+  const {
+    castShadow = false,
+    receiveShadow = true,
+    interactive = false
+  } = options;
   const group = new THREE.Group();
   if (!transformsList || transformsList.length === 0) return group;
 
   gltfScene.traverse((child) => {
-    if (child.isMesh) {
-      const iMesh = new THREE.InstancedMesh(child.geometry, child.material, transformsList.length);
-      iMesh.receiveShadow = true;
-      iMesh.castShadow = false;
+    if (!child.isMesh) return;
+    const iMesh = new THREE.InstancedMesh(child.geometry, child.material, transformsList.length);
+    iMesh.receiveShadow = receiveShadow;
+    iMesh.castShadow = castShadow;
 
-      const dummy = new THREE.Object3D();
-      transformsList.forEach((t, i) => {
-        dummy.position.set(t.x, t.y, t.z);
-        dummy.rotation.y = t.rot;
-        dummy.scale.set(1, 1, 1);
-        dummy.updateMatrix();
-        iMesh.setMatrixAt(i, dummy.matrix);
-      });
+    const dummy = new THREE.Object3D();
+    transformsList.forEach((t, i) => {
+      dummy.position.set(t.x, t.y, t.z);
+      dummy.rotation.y = t.rot;
+      const s = t.scale ?? 1;
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      iMesh.setMatrixAt(i, dummy.matrix);
+    });
 
-      iMesh.instanceMatrix.needsUpdate = true;
+    iMesh.instanceMatrix.needsUpdate = true;
+    iMesh.computeBoundingSphere();
+    if (interactive) {
       iMesh.userData.instancesData = transformsList.map(t => t.meta);
-      group.add(iMesh);
       interactiveObjects.push(iMesh);
     }
+    group.add(iMesh);
   });
 
+  return group;
+}
+
+function createInstancedBoxes(transformsList) {
+  const group = new THREE.Group();
+  if (!transformsList || transformsList.length === 0) return group;
+
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const mat = new THREE.MeshStandardMaterial({ roughness: 0.7, metalness: 0.05, side: THREE.FrontSide });
+  const iMesh = new THREE.InstancedMesh(geo, mat, transformsList.length);
+  iMesh.castShadow = true;
+  iMesh.receiveShadow = true;
+
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+  transformsList.forEach((t, i) => {
+    dummy.position.set(t.x, t.y, t.z);
+    dummy.rotation.y = t.rot;
+    dummy.scale.set(t.sx, t.sy, t.sz);
+    dummy.updateMatrix();
+    iMesh.setMatrixAt(i, dummy.matrix);
+    color.setHex(t.color);
+    iMesh.setColorAt(i, color);
+  });
+
+  iMesh.instanceMatrix.needsUpdate = true;
+  if (iMesh.instanceColor) iMesh.instanceColor.needsUpdate = true;
+  iMesh.computeBoundingSphere();
+  iMesh.userData.instancesData = transformsList.map(t => t.meta);
+  interactiveObjects.push(iMesh);
+  group.add(iMesh);
   return group;
 }
 
@@ -248,7 +402,7 @@ function buildWorld(data) {
   terrainMesh.receiveShadow = true;
   scene.add(terrainMesh);
 
-  // 2. Modular Autotiling Roads via InstancedMesh (Phase 1)
+  // 2. Modular Autotiling Roads via InstancedMesh (PLAN.md Section 4 & 6)
   const roadTransforms = {
     road_straight: [],
     road_corner: [],
@@ -261,7 +415,7 @@ function buildWorld(data) {
     if (item.kind !== 'road') return;
     const { x, y } = item;
 
-    // 4-neighbor cardinal bitmask (N=1, E=2, S=4, W=8), respecting PR #7 item.road_mask override if present
+    // 4-neighbor cardinal bitmask (N=1, E=2, S=4, W=8), respecting item.road_mask override if present
     const hasNorth = isRoad(x, y - 1);
     const hasEast  = isRoad(x + 1, y);
     const hasSouth = isRoad(x, y + 1);
@@ -285,121 +439,242 @@ function buildWorld(data) {
     });
   });
 
-  // Instantiate the 5 modular road models
+  // Instantiate the 5 modular road models (1 draw call per model type via InstancedMesh)
   for (const [modelKey, transforms] of Object.entries(roadTransforms)) {
     if (transforms.length === 0) continue;
     if (loadedModels[modelKey]) {
-      const roadGroup = createInstancedRoads(loadedModels[modelKey], transforms);
-      scene.add(roadGroup);
+      scene.add(createInstancedFromGltf(loadedModels[modelKey], transforms, {
+        castShadow: false,
+        receiveShadow: true,
+        interactive: true
+      }));
     } else {
-      // Fallback if model failed to load
+      // Fallback if model failed to load: still 1 InstancedMesh per model type so budget holds
       const roadFallbackMat = new THREE.MeshStandardMaterial({ color: BUILDING_COLORS.road, roughness: 0.8 });
       const roadFallbackGeo = new THREE.BoxGeometry(0.96, 0.08, 0.96);
-      transforms.forEach(t => {
-        const mesh = new THREE.Mesh(roadFallbackGeo, roadFallbackMat);
-        mesh.position.set(t.x, 0.04, t.z);
-        mesh.rotation.y = t.rot;
-        mesh.receiveShadow = true;
-        mesh.userData = t.meta;
-        scene.add(mesh);
-        interactiveObjects.push(mesh);
+      const iMesh = new THREE.InstancedMesh(roadFallbackGeo, roadFallbackMat, transforms.length);
+      iMesh.receiveShadow = true;
+      iMesh.castShadow = false;
+      const dummy = new THREE.Object3D();
+      transforms.forEach((t, i) => {
+        dummy.position.set(t.x, 0.04, t.z);
+        dummy.rotation.y = t.rot;
+        dummy.updateMatrix();
+        iMesh.setMatrixAt(i, dummy.matrix);
       });
+      iMesh.instanceMatrix.needsUpdate = true;
+      iMesh.computeBoundingSphere();
+      iMesh.userData.instancesData = transforms.map(t => t.meta);
+      interactiveObjects.push(iMesh);
+      scene.add(iMesh);
     }
   }
 
-  // 3. Built Structures (baseline standard orientation; lot-facing & door_side deferred to Phase 2)
+  // 3. Built Structures (PLAN.md Section 2, 5 & 6)
+  const SETBACK_DISTANCE = 0.12;
+
+  // Exporter facing priority: South (y + 1), East (x + 1), West (x - 1), North (y - 1)
+  const facingOrder = [
+    { dir: 's', dx: 0, dz: 1 },  // South (+Z)
+    { dir: 'e', dx: 1, dz: 0 },  // East (+X)
+    { dir: 'w', dx: -1, dz: 0 }, // West (-X)
+    { dir: 'n', dx: 0, dz: -1 }  // North (-Z)
+  ];
+
+  const glbBuildingTransforms = {
+    cabin: [],
+    studio: [],
+    workshop: []
+  };
+  const boxTransforms = [];
+
   built.forEach(item => {
     const { x, y, kind } = item;
     if (kind === 'road') return;
 
-    if (kind === 'cleared') {
-      const clearGeo = new THREE.BoxGeometry(0.98, 0.02, 0.98);
-      const clearMat = new THREE.MeshStandardMaterial({ color: 0x5a4832, roughness: 0.95 });
-      const clearMesh = new THREE.Mesh(clearGeo, clearMat);
-      clearMesh.position.set(x + 0.5, 0.01, y + 0.5);
-      clearMesh.receiveShadow = true;
-      clearMesh.userData = {
-        x, y, kind,
-        neighborhood: getNeighborhood(x, y, neighborhoods),
-        isStructure: true
-      };
-      scene.add(clearMesh);
-      interactiveObjects.push(clearMesh);
-      return;
-    }
-
-    if (kind === 'green') {
-      const greenGeo = new THREE.BoxGeometry(0.98, 0.04, 0.98);
-      const greenMat = new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.85 });
-      const greenMesh = new THREE.Mesh(greenGeo, greenMat);
-      greenMesh.position.set(x + 0.5, 0.02, y + 0.5);
-      greenMesh.receiveShadow = true;
-      greenMesh.userData = {
-        x, y, kind,
-        neighborhood: getNeighborhood(x, y, neighborhoods),
-        isStructure: true
-      };
-      scene.add(greenMesh);
-      interactiveObjects.push(greenMesh);
-      return;
-    }
-
-    let instance = null;
-
-    if (x === 55 && y === 57 && loadedModels['cabin']) {
-      // Pr0ject414's Cabin
-      instance = loadedModels['cabin'].clone();
-      instance.scale.set(0.28, 0.28, 0.28);
-      instance.position.set(x + 0.5, 0, y + 0.5);
-    } else if (x === 22 && y === 57 && loadedModels['studio']) {
-      // Sorrel Woods Artisan Studio
-      instance = loadedModels['studio'].clone();
-      instance.scale.set(0.28, 0.28, 0.28);
-      instance.position.set(x + 0.5, 0, y + 0.5);
-    } else if (kind === 'workshop' && loadedModels['workshop']) {
-      instance = loadedModels['workshop'].clone();
-      instance.scale.set(0.28, 0.28, 0.28);
-      instance.position.set(x + 0.5, 0, y + 0.5);
-    } else if (kind === 'house' && loadedModels['cabin']) {
-      instance = loadedModels['cabin'].clone();
-      instance.scale.set(0.25, 0.25, 0.25);
-      instance.position.set(x + 0.5, 0, y + 0.5);
-    } else {
-      // Procedural building block
-      const h = 0.8 + ((x * 13 + y * 7) % 6) * 0.2;
-      const bColor = BUILDING_COLORS[kind] || 0x777777;
-      const bMat = new THREE.MeshStandardMaterial({ color: bColor, roughness: 0.6 });
-      const bGeo = new THREE.BoxGeometry(0.85, h, 0.85);
-      instance = new THREE.Mesh(bGeo, bMat);
-      instance.position.set(x + 0.5, h / 2, y + 0.5);
-      instance.castShadow = true;
-      instance.receiveShadow = true;
-    }
-
-    // Attach metadata for inspection
-    instance.userData = {
+    const meta = {
       x, y, kind,
       neighborhood: getNeighborhood(x, y, neighborhoods),
       isStructure: true
     };
 
-    scene.add(instance);
-    interactiveObjects.push(instance);
-  });
+    if (kind === 'cleared') {
+      boxTransforms.push({
+        x: x + 0.5, y: 0.01, z: y + 0.5, rot: 0,
+        sx: 0.98, sy: 0.02, sz: 0.98, color: 0x5a4832, meta
+      });
+      return;
+    }
 
-  // 4. Scatter Pine Trees on forest tiles (representative sample; Poisson scatter deferred to Phase 3)
-  if (loadedModels['tree']) {
-    for (let z = 0; z < size; z += 4) {
-      for (let x = 0; x < size; x += 4) {
-        if (land[z] && land[z][x] === 'f' && !builtGrid[z][x]) {
-          const tree = loadedModels['tree'].clone();
-          const s = 0.2 + ((x * 7 + z * 11) % 5) * 0.03;
-          tree.scale.set(s, s, s);
-          tree.position.set(x + 0.5, 0, z + 0.5);
-          scene.add(tree);
+    if (kind === 'green') {
+      boxTransforms.push({
+        x: x + 0.5, y: 0.02, z: y + 0.5, rot: 0,
+        sx: 0.98, sy: 0.04, sz: 0.98, color: 0x2e7d32, meta
+      });
+      return;
+    }
+
+    // Auto-facing and setback away from adjacent road (PLAN.md Section 5)
+    let hasAdjacentRoad = false;
+    let roadDirX = 0;
+    let roadDirZ = 0;
+
+    if (item.door_side) {
+      const d = facingOrder.find(f => f.dir === item.door_side);
+      if (d) {
+        hasAdjacentRoad = true;
+        roadDirX = d.dx;
+        roadDirZ = d.dz;
+      }
+    }
+
+    if (!hasAdjacentRoad) {
+      for (const dir of facingOrder) {
+        if (isRoad(x + dir.dx, y + dir.dz)) {
+          hasAdjacentRoad = true;
+          roadDirX = dir.dx;
+          roadDirZ = dir.dz;
+          break;
         }
       }
     }
+
+    let rotationY = 0;
+    let posX = x + 0.5;
+    let posZ = y + 0.5;
+
+    if (hasAdjacentRoad) {
+      rotationY = Math.atan2(roadDirX, roadDirZ);
+      posX -= roadDirX * SETBACK_DISTANCE;
+      posZ -= roadDirZ * SETBACK_DISTANCE;
+    }
+
+    if ((kind === 'house' || (x === 55 && y === 57)) && loadedModels['cabin']) {
+      glbBuildingTransforms.cabin.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.150, meta });
+    } else if ((kind === 'studio' || (x === 22 && y === 57)) && loadedModels['studio']) {
+      glbBuildingTransforms.studio.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.138, meta });
+    } else if (kind === 'workshop' && loadedModels['workshop']) {
+      glbBuildingTransforms.workshop.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.155, meta });
+    } else {
+      const h = 0.8 + ((x * 13 + y * 7) % 6) * 0.2;
+      boxTransforms.push({
+        x: posX, y: h / 2, z: posZ, rot: rotationY,
+        sx: 0.72, sy: h, sz: 0.72,
+        color: BUILDING_COLORS[kind] || 0x777777,
+        meta
+      });
+    }
+  });
+
+  for (const [modelKey, transforms] of Object.entries(glbBuildingTransforms)) {
+    if (!transforms.length || !loadedModels[modelKey]) continue;
+    scene.add(createInstancedFromGltf(loadedModels[modelKey], transforms, {
+      castShadow: true,
+      receiveShadow: true,
+      interactive: true
+    }));
+  }
+  scene.add(createInstancedBoxes(boxTransforms));
+
+  // 4. Organic Tree Scatter with Poisson Clearance Buffer & InstancedMesh (PLAN.md Section 7)
+  if (loadedModels['tree']) {
+    const rng = createSeededRandom(12345);
+    const forestCandidates = [];
+
+    for (let z = 0; z < size; z++) {
+      for (let x = 0; x < size; x++) {
+        if (land[z] && land[z][x] === 'f') {
+          forestCandidates.push({ tx: x, tz: z });
+        }
+      }
+    }
+
+    // Deterministic shuffle
+    for (let i = forestCandidates.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = forestCandidates[i];
+      forestCandidates[i] = forestCandidates[j];
+      forestCandidates[j] = tmp;
+    }
+
+    const cellSize = 1.8;
+    const gridDim = Math.ceil(size / cellSize);
+    const treeGrid = Array.from({ length: gridDim }, () => new Array(gridDim).fill(null));
+    const treeTransforms = [];
+
+    for (const { tx, tz } of forestCandidates) {
+      // 1. Clearance from all built tiles (candidates must be >= 1.4 units away)
+      let nearBuilt = false;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const bx = tx + dx;
+          const by = tz + dy;
+          if (inBounds(bx, by) && builtGrid[by][bx]) {
+            if (Math.hypot(dx, dy) < 1.4) {
+              nearBuilt = true;
+              break;
+            }
+          }
+        }
+        if (nearBuilt) break;
+      }
+      if (nearBuilt) continue;
+
+      // Organic jitter
+      const posX = tx + 0.5 + (rng() - 0.5) * 0.35;
+      const posZ = tz + 0.5 + (rng() - 0.5) * 0.35;
+
+      // Verify world distance to any built tile is >= 1.4m
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const bx = tx + dx;
+          const by = tz + dy;
+          if (inBounds(bx, by) && builtGrid[by][bx]) {
+            if (Math.hypot(posX - (bx + 0.5), posZ - (by + 0.5)) < 1.4) {
+              nearBuilt = true;
+              break;
+            }
+          }
+        }
+        if (nearBuilt) break;
+      }
+      if (nearBuilt) continue;
+
+      // 2. Inter-tree spacing: candidate must be >= 1.8 units away from other trees
+      const gx = Math.floor(posX / cellSize);
+      const gz = Math.floor(posZ / cellSize);
+      let tooClose = false;
+
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const cx = gx + dx;
+          const cz = gz + dy;
+          if (cx >= 0 && cx < gridDim && cz >= 0 && cz < gridDim) {
+            const neighbor = treeGrid[cz][cx];
+            if (neighbor && Math.hypot(posX - neighbor.posX, posZ - neighbor.posZ) < 1.8) {
+              tooClose = true;
+              break;
+            }
+          }
+        }
+        if (tooClose) break;
+      }
+      if (tooClose) continue;
+
+      // Scale & Yaw variation (0.170 - 0.220)
+      const scale = 0.17 + rng() * 0.05;
+      const rotationY = rng() * Math.PI * 2;
+      const treeObj = { x: posX, y: 0, z: posZ, scale, rot: rotationY, posX, posZ };
+
+      treeTransforms.push(treeObj);
+      treeGrid[gz][gx] = treeObj;
+    }
+
+    scene.add(createInstancedFromGltf(loadedModels['tree'], treeTransforms, {
+      castShadow: true,
+      receiveShadow: true,
+      interactive: false
+    }));
   }
 
   window.__sceneReady = true;
