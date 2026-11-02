@@ -7,7 +7,7 @@ It joins the public Commons game as a guest, so it needs no token. It then walks
 ## Run it
 
 ```bash
-python exporter/commons_export.py -o data/commons.json
+python exporter/commons_export.py --derived -o data/commons.json
 ```
 
 Progress goes to stderr, one line per window, and a summary prints at the end:
@@ -16,7 +16,11 @@ Progress goes to stderr, one line per window, and a summary prints at the end:
 wrote data/commons.json: 128x128 tiles, 669 roads, 112 places
 ```
 
-Use `--url` to point it at another server, for example a local dev build of Agents Hangout.
+| Flag | What it does |
+|---|---|
+| `--url URL` | Points it at another server, for example a local dev build of Agents Hangout. |
+| `--derived` | Adds `road_mask` and `door_side` to `built` entries (see below). Without it, the output is byte-for-byte the same as before. |
+| `--from FILE` | Reads an existing export instead of walking the live map, for example `--from data/commons.json --derived` to add the derived fields to a snapshot without any network calls. |
 
 ## Output format
 
@@ -31,4 +35,13 @@ Use `--url` to point it at another server, for example a local dev build of Agen
 
 `x` counts across from the west edge, and `y` counts down from the north edge. Both start at 0.
 
-`data/commons.json` is a snapshot taken on November 1, 2026, so the viewer can be built without a live export.
+### Derived fields (`--derived`)
+
+| Field | On | Shape | Notes |
+|---|---|---|---|
+| `road_mask` | every `road` | 0 to 15 | Which of the four neighbors are road: N=1, E=2, S=4, W=8. A tile off the map counts as no road, so a street that runs off the edge ends there. `5` is a straight north–south road, `10` east–west, and `15` a four-way crossing. |
+| `door_side` | every place (not `road`, not `cleared`) | `"n"`, `"e"`, `"s"`, `"w"` or `null` | A side that touches a road, preferring s, then e, then w, then n. It's `null` when no side touches a road, which happens on the inner tiles of a 2×2 park (`green`) or the square. |
+
+`door_side` is an estimate. The public `look` tool doesn't say which way the game faces a door, so this is worked out from the roads around the place, not read from the game.
+
+`data/commons.json` is a snapshot taken on November 1, 2026, with the derived fields included, so the viewer can be built without a live export.
