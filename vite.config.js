@@ -2,8 +2,11 @@ import { defineConfig } from 'vite';
 import fs from 'node:fs';
 import path from 'node:path';
 
+const rawBase = process.env.VITE_BASE || './';
+const base = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
+
 export default defineConfig({
-  base: process.env.VITE_BASE || './',
+  base,
   server: {
     port: 5173,
     open: false
