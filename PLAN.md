@@ -828,7 +828,12 @@ Before submitting code:
    - **Southeast Forest `(115..123, 109)`**: Flat at $Y = 0.00\text{m}$, with 1-meter cut embankments rising into the forest.
    - **Shoreline Roads**: Flat at $Y = 0.00\text{m}$, with water bed sloping down to $-0.25\text{m}$.
    - **Southern Hills `(16, 92)`**: Flat at $Y = 0.00\text{m}$, with hillsides graded smoothly away.
-8. **Playwright CI**: `npx playwright test` passes with total draw calls $\le 20$ (nominal 12) and 2-pass reload determinism.
+8. **Double-Sided Asset Rendering & Glass Transparency (Section 13)**:
+   - All solid 3D models (`tree`, `cabin`, `studio`, `workshop`, all 5 road models) have `side: THREE.DoubleSide` and `shadowSide: THREE.DoubleSide`.
+   - Zero see-through foliage boughs or culled architectural roof eaves/canopies.
+   - `studio` and `workshop` window glass panes render with transparent material (`transparent: true, opacity: 0.35, depthWrite: false`), revealing interior furniture (workbench, stool, desk).
+   - Modular road models have normalized PBR roughness and metalness to eliminate specular contrast deltas.
+9. **Playwright CI**: `npx playwright test` passes with total draw calls $\le 20$ (nominal 14) and 2-pass reload determinism.
 
 ---
 
@@ -851,3 +856,315 @@ Before submitting code:
    - Connected Component Minimum Datum Propagation algorithm eliminating vertical steps between road segments.
    - Terrain corridor grading via quadrant-neighborhood minimum clamping.
    - 100% flush road beds across all 669 road tiles with civil-engineered embankments into forest and hill biomes.
+7. **Phase 7 (`fix/model-material-double-sided-normals`)**:
+   - Double-sided material restoration across all consolidated GLTF models (`tree`, `cabin`, `studio`, `workshop`, roads).
+   - Dual-stream consolidation partitioning opaque geometry and transparent architectural glass (`studio`, `workshop`).
+   - PBR roughness and metalness normalization across modular road models.
+
+---
+
+## 13. Double-Sided Material & Glass Transparency Architecture (Owner Feedback: Trees, Buildings, Glass Windows & Corner Roads)
+
+> **Architectural Objective**: Resolve critical owner feedback regarding transparent/see-through pine tree foliage (`media_1793641953449_3b2557a0.png`), inverted normals/culling on buildings (`cabin`, `studio`, `workshop`), non-transparent opaque glass on the studio (`media_1793642420728_6ba75a58.png`), and visual discrepancies on corner road tiles (`media_1793642068434_8cbf396c.png`), by formulating a dual-stream primitive consolidation architecture that separates opaque bodies from transparent architectural glass and restores double-sided rasterization while strictly guaranteeing scene draw calls $\le 20$ (nominal 14).
+
+---
+
+### 13.1 Owner Feedback & Defect Catalog
+
+1. **Defect 1: Transparent / See-Through Pine Trees**:
+   - Owner feedback: *"you need to create a new pr for fixing the inverted textures on the trees/other 3d models. we can see through the side we shouldnt be able too. meaning the textures are flipped."*
+   - Visual Evidence: `media_1793641953449_3b2557a0.png` shows pine tree needle foliage rendering transparent from the front/side, exposing the interior trunk and rear bough surfaces.
+2. **Defect 2: Building Geometry Culled from Reverse Viewing Angles**:
+   - Owner feedback: *"its not just trees that have issues with backface culling/normals. the other buildings do too i think. at least one of them. check them all."*
+   - Inspection shows thin architectural geometry (log cabin roof eaves, cedar trim, window glow planes; modern studio canopy, glass panes, planters; workshop corrugated roof overhangs and steel frames) disappearing when viewed from acute or reverse angles.
+3. **Defect 3: Non-Transparent Solid Glass on Studio**:
+   - Owner feedback: *"this building is supposed to have a glass (see through) material. but its not transparent, like it is in blender."*
+   - Visual Evidence: `media_1793642420728_6ba75a58.png` shows the studio building (`studio.glb`) rendered with 100% opaque, solid grey wall panels instead of transparent glass, completely occluding the artist interior (oak workbench, stool, blueprint roll, lamp, and wooden battens modeled in Blender).
+4. **Defect 4: Corner Road Color & Curb Slab Discrepancy**:
+   - Owner feedback: *"i aslo noticed that the corner road peices have different colors than the normal road peices."*
+   - Visual Evidence: `media_1793642068434_8cbf396c.png` reveals that `road_corner.glb` contains a solid outer corner curb slab (`Corner_Curb_Outer`) extending to `[-0.5, 0.5]` that covers nearly 40% of the tile in light-grey curb concrete (`#d3d0cb`), whereas `road_straight.glb` has narrow 0.10m curbs on each edge. Additionally, unequal vertex distributions skewed the averaged PBR roughness between straight ($0.745$) and corner ($0.784$), causing an anisotropic specular contrast across road seams.
+
+---
+
+### 13.2 Technical Root Cause Analysis & Exhaustive Asset Audit
+
+#### 13.2.1 Exhaustive Audit of Authoring Settings in GLB Assets
+Using glTF parser inspection on all 9 binary GLB models in `public/models/`:
+- **`pine_tree.glb`**: 6 sub-meshes, 3 materials (`Pine_Needles_Deep`, `Pine_Needles_Light`, `Pine_Bark`). **100% of materials have `doubleSided: true`** in glTF. Alpha mode is `OPAQUE` (alpha = 1.0).
+- **`cabin.glb`**: 119 sub-meshes, 10 materials (`Cabin_Stone_Dark`, `Cabin_Roof_Cedar`, `Cabin_Window_Glow`, etc.). **100% of materials have `doubleSided: true`** in glTF.
+- **`studio.glb`**: 46 sub-meshes, 8 materials:
+  * Opaque materials: `Studio_Concrete`, `Studio_BlackSteel`, `Studio_Wood_Oak`, `Studio_Lamp_Glow`, `Studio_Roof_Dark`, `Studio_Foliage`, `Studio_Wood_Walnut`. All have `doubleSided: true`.
+  * **Glass material**: `Studio_Glass` has `alphaMode: 'BLEND'`, `baseColorFactor: [0.85, 0.92, 0.98, 0.25]` (25% opacity / 75% transparency), `roughness: 0.05`, `doubleSided: true`.
+- **`workshop.glb`**: 72 sub-meshes, 7 materials:
+  * Opaque materials: `Workshop_Brick_Dark`, `Workshop_Steel_Dark`, `Workshop_Roof_Corrugated`, `Workshop_Brick_Red`, `Workshop_Lamp_Glow`, `Workshop_Concrete`. All have `doubleSided: true`.
+  * **Glass material**: `Workshop_Window_Glass` has `alphaMode: 'BLEND'`, `baseColorFactor: [0.75, 0.85, 0.90, 0.35]` (35% opacity / 65% transparency), `roughness: 0.15`, `doubleSided: true`.
+- **All 5 Road Models** (`road_straight`, `road_corner`, `road_t_cross`, `road_cross`, `road_deadend`): **100% of materials have `doubleSided: true`** in glTF.
+
+#### 13.2.2 The Three Root Causes in `collapseGltfToSingleMesh(gltfScene)`
+1. **Forced `side: THREE.FrontSide` (Backface Culling)**:
+   In `src/main.js` line 228:
+   ```javascript
+   const matConfig = {
+     vertexColors: true,
+     roughness: avgRoughness,
+     metalness: avgMetalness,
+     side: THREE.FrontSide // <-- ROOT CAUSE 1: Forces hardware backface culling!
+   };
+   ```
+   Under WebGL `glEnable(GL_CULL_FACE); glCullFace(GL_BACK)`, any triangle whose camera-space normal points away from the camera viewpoint ($\mathbf{N} \cdot \mathbf{V} \le 0$) is discarded. Because pine tree foliage boughs and architectural roof overhangs/eaves are modeled as single-layer geometric shells with upward/inward normals, viewing them from the front or eye-level results in $\mathbf{N} \cdot \mathbf{V} < 0$. The front-facing boughs cull away, allowing the camera to see straight through the foliage into the trunk and rear sides.
+2. **Single-Mesh Collapse Stripped Alpha Transparency**:
+   `collapseGltfToSingleMesh` merged all primitives (including `Studio_Glass` and `Workshop_Window_Glass`) into a single `THREE.BufferGeometry` and applied a single opaque `THREE.MeshStandardMaterial` (`transparent: false, opacity: 1.0`). Furthermore, vertex colors were baked into a 3-component RGB array `Float32Array(count * 3)`, completely dropping the 4th alpha component (`0.25` / `0.35`). Consequently, the glass windows became completely opaque, solid light-grey walls that hid the interior studio furniture.
+3. **Averaged Roughness Skew on Road Models**:
+   Because `collapseGltfToSingleMesh` computed `avgRoughness = totalRoughness / totalVerts`:
+   - `road_straight.glb` has 24 asphalt vertices and 48 curb vertices $\rightarrow \text{avgRoughness} = 0.745$.
+   - `road_corner.glb` has 392 asphalt vertices and 508 curb vertices $\rightarrow \text{avgRoughness} = 0.784$.
+   Under directional sunlight (`pos: (50, 70, 30)`), rotating the road 90 degrees along the corner curve alters the specular reflection angle $\mathbf{N} \cdot \mathbf{L}$ and $\mathbf{R} \cdot \mathbf{V}$, producing an artificial specular contrast across the tile seam.
+   Additionally, `road_corner.glb` was authored in Blender with an extended outer sidewalk plaza (`Corner_Curb_Outer` spanning to `[-0.5, 0.5]`) that covers ~40% of the tile in curb concrete (`#d3d0cb`), whereas straight roads have narrow 0.10m curbs.
+
+---
+
+### 13.3 Mathematical Formulation & Dual-Stream Architecture
+
+#### 13.3.1 Dual-Stream Primitive Partitioning
+To preserve full opacity for structural elements while rendering physically accurate transparent glass, the primitives of each GLTF model $\mathcal{G}$ are partitioned into two disjoint sets:
+$$\mathcal{P}_{\text{opaque}} = \{ p \in \mathcal{P} \mid \text{alphaMode}(p) \ne \text{'BLEND'} \land \alpha(p) \ge 0.99 \land \neg \text{isGlass}(p) \}$$
+$$\mathcal{P}_{\text{glass}} = \{ p \in \mathcal{P} \mid \text{alphaMode}(p) = \text{'BLEND'} \lor \alpha(p) < 0.99 \lor \text{isGlass}(p) \}$$
+where:
+$$\text{isGlass}(p) \iff \text{matName}(p) \in \{ \text{'Studio_Glass'}, \text{'Workshop_Window_Glass'} \}$$
+
+#### 13.3.2 Opaque Body Mesh Configuration
+All primitives in $\mathcal{P}_{\text{opaque}}$ are consolidated into `opaqueMesh`:
+$$\text{Geometry}_{\text{opaque}} = \bigoplus_{p \in \mathcal{P}_{\text{opaque}}} \mathbf{M}_{\text{world}}(p) \cdot p.\text{geometry}$$
+$$\text{Material}_{\text{opaque}} = \text{MeshStandardMaterial}(\{$$
+$$\quad \text{vertexColors: true}, \quad \text{roughness: } \text{avgRoughness}_{\text{opaque}}, \quad \text{metalness: } \text{avgMetalness}_{\text{opaque}},$$
+$$\quad \text{side: THREE.DoubleSide}, \quad \text{shadowSide: THREE.DoubleSide},$$
+$$\quad \text{transparent: false}, \quad \text{depthWrite: true}$$
+$$\})$$
+
+#### 13.3.3 Transparent Glass Mesh Configuration
+All primitives in $\mathcal{P}_{\text{glass}}$ (if non-empty) are consolidated into `glassMesh`:
+$$\text{Geometry}_{\text{glass}} = \bigoplus_{p \in \mathcal{P}_{\text{glass}}} \mathbf{M}_{\text{world}}(p) \cdot p.\text{geometry}$$
+$$\text{Material}_{\text{glass}} = \text{MeshStandardMaterial}(\{$$
+$$\quad \text{color: new THREE.Color}(0.85, 0.92, 0.98),$$
+$$\quad \text{transparent: true}, \quad \text{opacity: } 0.35,$$
+$$\quad \text{roughness: } 0.05, \quad \text{metalness: } 0.10,$$
+$$\quad \text{side: THREE.DoubleSide}, \quad \text{depthWrite: false},$$
+$$\quad \text{castShadow: false}, \quad \text{receiveShadow: true}$$
+$$\})$$
+
+#### 13.3.4 Geometric Grounding Co-Registration Invariant
+Because both geometries belong to the same physical building, the vertical plinth offset $T_y$ must be calculated from the **combined bounding box** of $\mathcal{P}_{\text{opaque}} \cup \mathcal{P}_{\text{glass}}$:
+$$y_{\min} = \min(y_{\min, \text{opaque}}, y_{\min, \text{glass}})$$
+$$T_y = -y_{\min} \quad \text{if } |y_{\min}| > 0.001\text{m}$$
+$$\text{Geometry}_{\text{opaque}}.\text{translate}(0, T_y, 0), \quad \text{Geometry}_{\text{glass}}.\text{translate}(0, T_y, 0)$$
+This guarantees that glass window panes remain mathematically flush with their steel window mullions and concrete foundation plinths without any vertex drift.
+
+#### 13.3.5 Road PBR Uniformity Invariant
+To eliminate specular luminance seams across modular road segments:
+$$\text{roughness}_{\text{road}} = 0.75, \quad \text{metalness}_{\text{road}} = 0.05 \quad \forall \text{ road models}$$
+
+#### 13.3.6 Draw-Call Budget Invariant
+- Ground terrain: 1 call
+- Stylized water: 1 call
+- Tree scatter (`InstancedMesh`): 1 call
+- Cabin (`InstancedMesh`): 1 call
+- Studio: 1 opaque `InstancedMesh` + 1 glass `InstancedMesh` = 2 calls
+- Workshop: 1 opaque `InstancedMesh` + 1 glass `InstancedMesh` = 2 calls
+- Road kit (5 modular types $\times$ 1 `InstancedMesh`): 5 calls
+- Lot boundary / debug: 1 call
+$$\text{Total Draw Calls} = 1 + 1 + 1 + 1 + 2 + 2 + 5 + 1 = 14 \text{ calls} \le 20 \text{ (Budget Pass)}$$
+
+---
+
+### 13.4 Concrete Implementation Specifications for `src/main.js`
+
+In `src/main.js`, update `collapseGltfToSingleMesh(gltfScene)` to support dual-stream partitioning:
+
+```javascript
+function collapseGltfToSingleMesh(gltfScene) {
+  gltfScene.updateMatrixWorld(true);
+  const opaqueParts = [];
+  const glassParts = [];
+
+  let totalVerts = 0;
+  let totalRoughness = 0;
+  let totalMetalness = 0;
+  let primaryTexture = null;
+  let anyHasUV = false;
+
+  // 1. First pass: inspect UV attributes
+  gltfScene.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    if (child.geometry.attributes.uv) anyHasUV = true;
+  });
+
+  // Helper: detect if a mesh/material is transparent glass
+  const isGlassPrimitive = (mat, name) => {
+    if (!mat) return false;
+    if (mat.alphaMode === 'BLEND') return true;
+    if (typeof mat.opacity === 'number' && mat.opacity < 0.95) return true;
+    const n = (mat.name || '').toLowerCase() + ' ' + (name || '').toLowerCase();
+    return n.includes('glass') || n.includes('window');
+  };
+
+  // 2. Second pass: partition into opaque vs glass
+  gltfScene.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const mat = Array.isArray(child.material) ? child.material[0] : child.material;
+    const isGlass = isGlassPrimitive(mat, child.name);
+
+    const color = (mat && mat.color) ? mat.color : new THREE.Color(1, 1, 1);
+    const roughness = (mat && typeof mat.roughness === 'number') ? mat.roughness : 0.75;
+    const metalness = (mat && typeof mat.metalness === 'number') ? mat.metalness : 0.05;
+
+    if (mat && mat.map && !primaryTexture && !isGlass) primaryTexture = mat.map;
+
+    let geo = child.geometry.clone();
+    if (geo.index) geo = geo.toNonIndexed();
+    geo.applyMatrix4(child.matrixWorld);
+
+    const count = geo.attributes.position.count;
+    if (!isGlass) {
+      totalVerts += count;
+      totalRoughness += roughness * count;
+      totalMetalness += metalness * count;
+    }
+
+    const colorArr = new Float32Array(count * 3);
+    const hasExistingColor = !!geo.attributes.color;
+    for (let i = 0; i < count; i++) {
+      if (hasExistingColor) {
+        colorArr[i * 3]     = geo.attributes.color.getX(i) * color.r;
+        colorArr[i * 3 + 1] = geo.attributes.color.getY(i) * color.g;
+        colorArr[i * 3 + 2] = geo.attributes.color.getZ(i) * color.b;
+      } else {
+        colorArr[i * 3]     = color.r;
+        colorArr[i * 3 + 1] = color.g;
+        colorArr[i * 3 + 2] = color.b;
+      }
+    }
+
+    const slim = new THREE.BufferGeometry();
+    slim.setAttribute('position', geo.attributes.position.clone());
+    if (geo.attributes.normal) {
+      slim.setAttribute('normal', geo.attributes.normal.clone());
+    } else {
+      slim.computeVertexNormals();
+    }
+
+    if (anyHasUV) {
+      if (geo.attributes.uv) {
+        slim.setAttribute('uv', geo.attributes.uv.clone());
+      } else {
+        slim.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(count * 2), 2));
+      }
+    }
+
+    slim.setAttribute('color', new THREE.Float32BufferAttribute(colorArr, 3));
+    if (isGlass) {
+      glassParts.push(slim);
+    } else {
+      opaqueParts.push(slim);
+    }
+  });
+
+  if (opaqueParts.length === 0 && glassParts.length === 0) return gltfScene;
+
+  const mergedOpaque = opaqueParts.length > 0 ? mergeGeometries(opaqueParts, false) : null;
+  const mergedGlass = glassParts.length > 0 ? mergeGeometries(glassParts, false) : null;
+
+  // Unified geometric grounding: compute combined minY
+  let minY = 0;
+  if (mergedOpaque) {
+    mergedOpaque.computeBoundingBox();
+    if (mergedOpaque.boundingBox) minY = Math.min(minY, mergedOpaque.boundingBox.min.y);
+  }
+  if (mergedGlass) {
+    mergedGlass.computeBoundingBox();
+    if (mergedGlass.boundingBox) minY = Math.min(minY, mergedGlass.boundingBox.min.y);
+  }
+
+  if (Math.abs(minY) > 0.001) {
+    if (mergedOpaque) mergedOpaque.translate(0, -minY, 0);
+    if (mergedGlass) mergedGlass.translate(0, -minY, 0);
+  }
+
+  if (mergedOpaque) {
+    mergedOpaque.computeBoundingBox();
+    mergedOpaque.computeBoundingSphere();
+    if (!mergedOpaque.attributes.normal) mergedOpaque.computeVertexNormals();
+  }
+  if (mergedGlass) {
+    mergedGlass.computeBoundingBox();
+    mergedGlass.computeBoundingSphere();
+    if (!mergedGlass.attributes.normal) mergedGlass.computeVertexNormals();
+  }
+
+  const group = new THREE.Group();
+
+  // Create opaque mesh
+  if (mergedOpaque) {
+    const avgRoughness = totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75;
+    const avgMetalness = totalVerts > 0 ? (totalMetalness / totalVerts) : 0.05;
+
+    const opaqueMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: avgRoughness,
+      metalness: avgMetalness,
+      side: THREE.DoubleSide,
+      shadowSide: THREE.DoubleSide,
+      transparent: false,
+      depthWrite: true
+    });
+    if (primaryTexture) opaqueMat.map = primaryTexture;
+
+    const opaqueMesh = new THREE.Mesh(mergedOpaque, opaqueMat);
+    opaqueMesh.castShadow = true;
+    opaqueMesh.receiveShadow = true;
+    group.add(opaqueMesh);
+  }
+
+  // Create glass mesh
+  if (mergedGlass) {
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0.85, 0.92, 0.98),
+      transparent: true,
+      opacity: 0.35,
+      roughness: 0.05,
+      metalness: 0.10,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const glassMesh = new THREE.Mesh(mergedGlass, glassMat);
+    glassMesh.castShadow = false;
+    glassMesh.receiveShadow = true;
+    group.add(glassMesh);
+  }
+
+  return group;
+}
+```
+
+---
+
+### 13.5 Automated Test Plan (`tests/draw-calls.spec.js`)
+
+In `tests/draw-calls.spec.js`, add test suite:
+1. **Double-Sided Material Invariant**:
+   Assert that for all models (`tree`, `cabin`, `studio`, `workshop`, and roads), the primary material has `side === THREE.DoubleSide` and `shadowSide === THREE.DoubleSide`.
+2. **Glass Transparency Verification**:
+   Assert that `studio` and `workshop` contain a child glass mesh with `material.transparent === true` and `material.opacity <= 0.5`.
+3. **PBR Road Parameter Verification**:
+   Assert that road model materials have `roughness` matching within $\pm 0.05$ across all 5 modular road types.
+4. **Draw-Call Ceiling Check**:
+   Assert total scene draw calls remain $\le 20$ (nominal 14).
+
+---
+
+### 13.6 Actionable Implementation Checklist for `flash-leaf-coder`
+
+1. **Step 1**: In `src/main.js`, update `collapseGltfToSingleMesh` to implement dual-stream partitioning (`opaqueParts` and `glassParts`) with `side: THREE.DoubleSide`.
+2. **Step 2**: Ensure unified vertical translation $T_y$ is applied equally to both opaque and glass geometries.
+3. **Step 3**: Standardize road PBR roughness ($0.75$) and metalness ($0.05$) across modular road models.
+4. **Step 4**: Update `tests/draw-calls.spec.js` with the Section 13 automated test suite.
+5. **Step 5**: Run `npm run build` and `npx playwright test` and verify all tests pass.

@@ -228,4 +228,82 @@ test.describe('Commons draw-call budget', () => {
     expect(report.road45_23).toBeCloseTo(0.00, 3);
     expect(report.vertex46_23_y).toBeCloseTo(0.00, 3);
   });
+  test('double-sided materials, glass transparency, and PBR road parameters satisfy Section 13', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+
+    const report = await page.evaluate(() => {
+      if (!window.__perf || typeof window.__perf.getLoadedModels !== 'function') return null;
+      const loaded = window.__perf.getLoadedModels();
+      const keys = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+
+      const modelsInfo = {};
+      for (const key of keys) {
+        const group = loaded[key];
+        if (!group) continue;
+        const meshes = [];
+        group.traverse((c) => {
+          if (c.isMesh) {
+            meshes.push({
+              name: c.name,
+              transparent: c.material.transparent,
+              opacity: c.material.opacity,
+              side: c.material.side,
+              shadowSide: c.material.shadowSide,
+              roughness: c.material.roughness,
+              metalness: c.material.metalness,
+              depthWrite: c.material.depthWrite
+            });
+          }
+        });
+        modelsInfo[key] = meshes;
+      }
+
+      return {
+        modelsInfo,
+        calls: window.__perf.getDrawCalls()
+      };
+    });
+
+    expect(report, 'perf inspection unavailable').not.toBeNull();
+    const { modelsInfo, calls } = report;
+
+    // 1. Double-Sided Material Invariant (THREE.DoubleSide === 2)
+    const requiredModels = ['tree', 'cabin', 'studio', 'workshop', 'road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+    for (const key of requiredModels) {
+      expect(modelsInfo[key], `expected model ${key} to be loaded`).toBeDefined();
+      const opaqueMesh = modelsInfo[key].find((m) => !m.transparent);
+      expect(opaqueMesh, `expected opaque mesh in model ${key}`).toBeDefined();
+      expect(opaqueMesh.side, `opaque material in ${key} must have DoubleSide`).toBe(2);
+      expect(opaqueMesh.shadowSide, `opaque material in ${key} must have DoubleSide shadowSide`).toBe(2);
+    }
+
+    // 2. Glass Transparency Verification for Studio and Workshop
+    const studioGlass = modelsInfo['studio']?.find((m) => m.transparent);
+    expect(studioGlass, 'studio must have a transparent glass mesh').toBeDefined();
+    expect(studioGlass.opacity, 'studio glass opacity must be <= 0.5').toBeLessThanOrEqual(0.5);
+    expect(studioGlass.side, 'studio glass side must be DoubleSide').toBe(2);
+    expect(studioGlass.depthWrite, 'studio glass depthWrite must be false').toBe(false);
+
+    const workshopGlass = modelsInfo['workshop']?.find((m) => m.transparent);
+    expect(workshopGlass, 'workshop must have a transparent glass mesh').toBeDefined();
+    expect(workshopGlass.opacity, 'workshop glass opacity must be <= 0.5').toBeLessThanOrEqual(0.5);
+    expect(workshopGlass.side, 'workshop glass side must be DoubleSide').toBe(2);
+    expect(workshopGlass.depthWrite, 'workshop glass depthWrite must be false').toBe(false);
+
+    // 3. PBR Road Parameter Verification
+    const roadKeys = ['road_straight', 'road_corner', 'road_t_cross', 'road_cross', 'road_deadend'];
+    const straightRoughness = modelsInfo['road_straight'][0].roughness;
+    for (const rKey of roadKeys) {
+      const roadMesh = modelsInfo[rKey][0];
+      expect(roadMesh.roughness).toBeCloseTo(0.75, 2);
+      expect(roadMesh.metalness).toBeCloseTo(0.05, 2);
+      expect(Math.abs(roadMesh.roughness - straightRoughness)).toBeLessThanOrEqual(0.05);
+    }
+
+    // 4. Draw-Call Ceiling Check (nominal 14, strictly <= 20)
+    expect(calls).toBeLessThanOrEqual(20);
+  });
 });
