@@ -17,7 +17,7 @@ export default defineConfig({
       name: 'copy-commons-data',
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
-          if (req.url === '/data/commons.json') {
+          if (req.url && req.url.endsWith('/data/commons.json')) {
             const dataPath = path.resolve(__dirname, 'data/commons.json');
             if (fs.existsSync(dataPath)) {
               res.setHeader('Content-Type', 'application/json');
