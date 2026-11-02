@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { createWaterSystem } from './waterShader.js';
 
 // Setup Renderer, Scene & Camera
 const container = document.getElementById('canvas-container');
@@ -27,10 +26,7 @@ controls.maxPolarAngle = Math.PI / 2 - 0.04;
 
 const urlParams = new URLSearchParams(window.location.search);
 const camParam = urlParams.get('cam');
-if (camParam === 'water') {
-  camera.position.set(26, 14, 40);
-  controls.target.set(10, 0, 36);
-} else if (camParam === 'cabin') {
+if (camParam === 'cabin') {
   camera.position.set(55, 6, 66);
   controls.target.set(55, 0, 57);
 } else if (camParam === 'studio') {
@@ -105,16 +101,6 @@ const ROAD_AUTOTILE_TABLE = {
   15: { model: 'road_cross',    rot: 0 }               // Connects North + East + South + West (4-way)
 };
 
-// Seeded PRNG for deterministic placement
-function createSeededRandom(seed = 12345) {
-  let s = seed % 2147483647;
-  if (s <= 0) s += 2147483646;
-  return function() {
-    s = (s * 16807) % 2147483647;
-    return (s - 1) / 2147483646;
-  };
-}
-
 // GLTF Asset Cache & Loader
 const gltfLoader = new GLTFLoader();
 const loadedModels = {};
@@ -179,37 +165,6 @@ function createInstancedRoads(gltfScene, transformsList) {
   return group;
 }
 
-// Helper to create InstancedMesh group for trees
-function createInstancedTrees(gltfScene, transformsList) {
-  const group = new THREE.Group();
-  if (!transformsList || transformsList.length === 0) return group;
-
-  gltfScene.traverse((child) => {
-    if (child.isMesh) {
-      const iMesh = new THREE.InstancedMesh(child.geometry, child.material, transformsList.length);
-      iMesh.castShadow = true;
-      iMesh.receiveShadow = true;
-
-      const dummy = new THREE.Object3D();
-      transformsList.forEach((t, i) => {
-        dummy.position.set(t.x, t.y, t.z);
-        dummy.rotation.y = t.rot;
-        dummy.scale.set(t.scale, t.scale, t.scale);
-        dummy.updateMatrix();
-        iMesh.setMatrixAt(i, dummy.matrix);
-      });
-
-      iMesh.instanceMatrix.needsUpdate = true;
-      group.add(iMesh);
-    }
-  });
-
-  return group;
-}
-
-// Stylized Water System Handle
-let waterSystem = null;
-
 // Raycasting & Interaction
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -236,7 +191,7 @@ function buildWorld(data) {
   const built = data.built || [];
   const neighborhoods = data.neighborhoods || [];
 
-  // 2D Spatial Lookup Grid & In-Bounds Check (PLAN.md Section 3.1)
+  // Spatial Lookup Grid & In-Bounds Check
   const inBounds = (x, y) => x >= 0 && x < size && y >= 0 && y < size;
 
   const builtGrid = Array.from({ length: size }, () => new Array(size).fill(null));
@@ -269,14 +224,10 @@ function buildWorld(data) {
     const char = (land[z] && land[z][x]) ? land[z][x] : 'g';
     colorHelper.setHex(TERRAIN_PALETTE[char] || TERRAIN_PALETTE.g);
 
-    // Height displacement: keep built foundations flat at y=0 so models don't clip
     let y = 0;
-    if (char === 'w') {
-      y = -0.28;
-    } else if (!builtGrid[z][x]) {
-      if (char === 'h') y = 0.6;
-      else if (char === 'f') y = 0.1;
-    }
+    if (char === 'w') y = -0.25;
+    else if (char === 'h') y = 0.6;
+    else if (char === 'f') y = 0.1;
     terrainGeo.attributes.position.setY(i, y);
 
     colors[i * 3] = colorHelper.r;
@@ -297,10 +248,7 @@ function buildWorld(data) {
   terrainMesh.receiveShadow = true;
   scene.add(terrainMesh);
 
-  // 1b. Stylized Water System (two-tone depth, harmonic waves, shoreline foam, caustics)
-  waterSystem = createWaterSystem(scene, size, land);
-
-  // 2. Modular Autotiling Roads via InstancedMesh (PLAN.md Section 4 & 6)
+  // 2. Modular Autotiling Roads via InstancedMesh (Phase 1)
   const roadTransforms = {
     road_straight: [],
     road_corner: [],
@@ -337,7 +285,7 @@ function buildWorld(data) {
     });
   });
 
-  // Instantiate the 5 road models
+  // Instantiate the 5 modular road models
   for (const [modelKey, transforms] of Object.entries(roadTransforms)) {
     if (transforms.length === 0) continue;
     if (loadedModels[modelKey]) {
@@ -359,15 +307,7 @@ function buildWorld(data) {
     }
   }
 
-  // 3. Built Structures, Auto-Facing & Setback (PLAN.md Section 5)
-  const SETBACK_DISTANCE = 0.12; // meters away from adjacent road curb
-  const facingOrder = [
-    { dx: 0, dz: 1 },  // South (y + 1)
-    { dx: 0, dz: -1 }, // North (y - 1)
-    { dx: 1, dz: 0 },  // East (x + 1)
-    { dx: -1, dz: 0 }  // West (x - 1)
-  ];
-
+  // 3. Built Structures (baseline standard orientation; lot-facing & door_side deferred to Phase 2)
   built.forEach(item => {
     const { x, y, kind } = item;
     if (kind === 'road') return;
@@ -404,71 +344,34 @@ function buildWorld(data) {
       return;
     }
 
-    // Auto-facing and setback away from adjacent road
-    let hasAdjacentRoad = false;
-    let roadDirX = 0;
-    let roadDirZ = 0;
-
-    for (const dir of facingOrder) {
-      if (isRoad(x + dir.dx, y + dir.dz)) {
-        hasAdjacentRoad = true;
-        roadDirX = dir.dx;
-        roadDirZ = dir.dz;
-        break;
-      }
-    }
-
-    let rotationY = 0;
-    let posX = x + 0.5;
-    let posZ = y + 0.5;
-
-    if (hasAdjacentRoad) {
-      rotationY = Math.atan2(roadDirX, roadDirZ);
-      posX -= roadDirX * SETBACK_DISTANCE;
-      posZ -= roadDirZ * SETBACK_DISTANCE;
-    }
-
     let instance = null;
 
     if (x === 55 && y === 57 && loadedModels['cabin']) {
-      // Pr0ject414's Cabin (calibrated scale 0.150)
+      // Pr0ject414's Cabin
       instance = loadedModels['cabin'].clone();
-      instance.scale.set(0.150, 0.150, 0.150);
-      instance.position.set(posX, 0, posZ);
-      instance.rotation.y = rotationY;
+      instance.scale.set(0.28, 0.28, 0.28);
+      instance.position.set(x + 0.5, 0, y + 0.5);
     } else if (x === 22 && y === 57 && loadedModels['studio']) {
-      // Sorrel Woods Artisan Studio (calibrated scale 0.138)
+      // Sorrel Woods Artisan Studio
       instance = loadedModels['studio'].clone();
-      instance.scale.set(0.138, 0.138, 0.138);
-      instance.position.set(posX, 0, posZ);
-      instance.rotation.y = rotationY;
+      instance.scale.set(0.28, 0.28, 0.28);
+      instance.position.set(x + 0.5, 0, y + 0.5);
     } else if (kind === 'workshop' && loadedModels['workshop']) {
-      // Workshop (calibrated scale 0.155)
       instance = loadedModels['workshop'].clone();
-      instance.scale.set(0.155, 0.155, 0.155);
-      instance.position.set(posX, 0, posZ);
-      instance.rotation.y = rotationY;
-    } else if (kind === 'studio' && loadedModels['studio']) {
-      // Studio (calibrated scale 0.138)
-      instance = loadedModels['studio'].clone();
-      instance.scale.set(0.138, 0.138, 0.138);
-      instance.position.set(posX, 0, posZ);
-      instance.rotation.y = rotationY;
+      instance.scale.set(0.28, 0.28, 0.28);
+      instance.position.set(x + 0.5, 0, y + 0.5);
     } else if (kind === 'house' && loadedModels['cabin']) {
-      // Residential Cabin (calibrated scale 0.150)
       instance = loadedModels['cabin'].clone();
-      instance.scale.set(0.150, 0.150, 0.150);
-      instance.position.set(posX, 0, posZ);
-      instance.rotation.y = rotationY;
+      instance.scale.set(0.25, 0.25, 0.25);
+      instance.position.set(x + 0.5, 0, y + 0.5);
     } else {
-      // Procedural building block (calibrated 0.72m footprint to match lot setbacks)
+      // Procedural building block
       const h = 0.8 + ((x * 13 + y * 7) % 6) * 0.2;
       const bColor = BUILDING_COLORS[kind] || 0x777777;
       const bMat = new THREE.MeshStandardMaterial({ color: bColor, roughness: 0.6 });
-      const bGeo = new THREE.BoxGeometry(0.72, h, 0.72);
+      const bGeo = new THREE.BoxGeometry(0.85, h, 0.85);
       instance = new THREE.Mesh(bGeo, bMat);
-      instance.position.set(posX, h / 2, posZ);
-      instance.rotation.y = rotationY;
+      instance.position.set(x + 0.5, h / 2, y + 0.5);
       instance.castShadow = true;
       instance.receiveShadow = true;
     }
@@ -484,102 +387,19 @@ function buildWorld(data) {
     interactiveObjects.push(instance);
   });
 
-  // 4. Organic Tree Scatter with Poisson Clearance Buffer & InstancedMesh (PLAN.md Section 7)
+  // 4. Scatter Pine Trees on forest tiles (representative sample; Poisson scatter deferred to Phase 3)
   if (loadedModels['tree']) {
-    const rng = createSeededRandom(12345);
-    const forestCandidates = [];
-
-    for (let z = 0; z < size; z++) {
-      for (let x = 0; x < size; x++) {
-        if (land[z] && land[z][x] === 'f') {
-          forestCandidates.push({ tx: x, tz: z });
+    for (let z = 0; z < size; z += 4) {
+      for (let x = 0; x < size; x += 4) {
+        if (land[z] && land[z][x] === 'f' && !builtGrid[z][x]) {
+          const tree = loadedModels['tree'].clone();
+          const s = 0.2 + ((x * 7 + z * 11) % 5) * 0.03;
+          tree.scale.set(s, s, s);
+          tree.position.set(x + 0.5, 0, z + 0.5);
+          scene.add(tree);
         }
       }
     }
-
-    // Deterministic shuffle
-    for (let i = forestCandidates.length - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      const tmp = forestCandidates[i];
-      forestCandidates[i] = forestCandidates[j];
-      forestCandidates[j] = tmp;
-    }
-
-    const cellSize = 1.8;
-    const gridDim = Math.ceil(size / cellSize);
-    const treeGrid = Array.from({ length: gridDim }, () => new Array(gridDim).fill(null));
-    const treeTransforms = [];
-
-    for (const { tx, tz } of forestCandidates) {
-      // 1. Clearance from all built tiles (candidates must be >= 1.4 units away)
-      let nearBuilt = false;
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const bx = tx + dx;
-          const by = tz + dy;
-          if (inBounds(bx, by) && builtGrid[by][bx]) {
-            if (Math.hypot(dx, dy) < 1.4) {
-              nearBuilt = true;
-              break;
-            }
-          }
-        }
-        if (nearBuilt) break;
-      }
-      if (nearBuilt) continue;
-
-      // Organic jitter
-      const posX = tx + 0.5 + (rng() - 0.5) * 0.35;
-      const posZ = tz + 0.5 + (rng() - 0.5) * 0.35;
-
-      // Verify world distance to any built tile is >= 1.4m
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const bx = tx + dx;
-          const by = tz + dy;
-          if (inBounds(bx, by) && builtGrid[by][bx]) {
-            if (Math.hypot(posX - (bx + 0.5), posZ - (by + 0.5)) < 1.4) {
-              nearBuilt = true;
-              break;
-            }
-          }
-        }
-        if (nearBuilt) break;
-      }
-      if (nearBuilt) continue;
-
-      // 2. Inter-tree spacing: candidate must be >= 1.8 units away from other trees
-      const gx = Math.floor(posX / cellSize);
-      const gz = Math.floor(posZ / cellSize);
-      let tooClose = false;
-
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const cx = gx + dx;
-          const cz = gz + dy;
-          if (cx >= 0 && cx < gridDim && cz >= 0 && cz < gridDim) {
-            const neighbor = treeGrid[cz][cx];
-            if (neighbor && Math.hypot(posX - neighbor.posX, posZ - neighbor.posZ) < 1.8) {
-              tooClose = true;
-              break;
-            }
-          }
-        }
-        if (tooClose) break;
-      }
-      if (tooClose) continue;
-
-      // Scale & Yaw variation (0.170 - 0.220)
-      const scale = 0.17 + rng() * 0.05;
-      const rotationY = rng() * Math.PI * 2;
-      const treeObj = { x: posX, y: 0, z: posZ, scale, rot: rotationY, posX, posZ };
-
-      treeTransforms.push(treeObj);
-      treeGrid[gz][gx] = treeObj;
-    }
-
-    const treeGroup = createInstancedTrees(loadedModels['tree'], treeTransforms);
-    scene.add(treeGroup);
   }
 
   window.__sceneReady = true;
@@ -755,11 +575,6 @@ window.addEventListener('resize', () => {
 // Animation Loop
 function animate() {
   requestAnimationFrame(animate);
-
-  if (waterSystem) {
-    waterSystem.update(performance.now() * 0.001);
-  }
-
   controls.update();
   renderer.render(scene, camera);
 }

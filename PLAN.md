@@ -80,20 +80,20 @@ Check the 4 orthogonal cardinal neighbors for the presence of a road tile.
 const ROAD_AUTOTILE_TABLE = {
   // Mask: { modelKey, rotationY }
   0:  { model: 'road_straight', rot: 0 },              // Isolated single tile fallback
-  1:  { model: 'road_deadend',  rot: Math.PI },        // Connects North only
-  2:  { model: 'road_deadend',  rot: -Math.PI / 2 },   // Connects East only
-  3:  { model: 'road_corner',   rot: 0 },              // Connects North + East
-  4:  { model: 'road_deadend',  rot: 0 },              // Connects South only
-  5:  { model: 'road_straight', rot: 0 },              // Connects North + South
-  6:  { model: 'road_corner',   rot: Math.PI / 2 },    // Connects East + South
-  7:  { model: 'road_t_cross',  rot: 0 },              // Connects North + East + South
-  8:  { model: 'road_deadend',  rot: Math.PI / 2 },    // Connects West only
-  9:  { model: 'road_corner',   rot: -Math.PI / 2 },   // Connects West + North
-  10: { model: 'road_straight', rot: Math.PI / 2 },    // Connects East + West
-  11: { model: 'road_t_cross',  rot: -Math.PI / 2 },   // Connects West + North + East
-  12: { model: 'road_corner',   rot: Math.PI },        // Connects South + West
-  13: { model: 'road_t_cross',  rot: Math.PI },        // Connects South + West + North
-  14: { model: 'road_t_cross',  rot: Math.PI / 2 },    // Connects East + South + West
+  1:  { model: 'road_deadend',  rot: Math.PI },        // Connects North (-Z) only
+  2:  { model: 'road_deadend',  rot: Math.PI / 2 },    // Connects East (+X) only
+  3:  { model: 'road_corner',   rot: 0 },              // Connects North (-Z) + East (+X)
+  4:  { model: 'road_deadend',  rot: 0 },              // Connects South (+Z) only
+  5:  { model: 'road_straight', rot: 0 },              // Connects North (-Z) + South (+Z)
+  6:  { model: 'road_corner',   rot: -Math.PI / 2 },   // Connects East (+X) + South (+Z)
+  7:  { model: 'road_t_cross',  rot: 0 },              // Connects North (-Z) + East (+X) + South (+Z)
+  8:  { model: 'road_deadend',  rot: -Math.PI / 2 },   // Connects West (-X) only
+  9:  { model: 'road_corner',   rot: Math.PI / 2 },    // Connects West (-X) + North (-Z)
+  10: { model: 'road_straight', rot: Math.PI / 2 },    // Connects East (+X) + West (-X)
+  11: { model: 'road_t_cross',  rot: Math.PI / 2 },    // Connects West (-X) + North (-Z) + East (+X)
+  12: { model: 'road_corner',   rot: Math.PI },        // Connects South (+Z) + West (-X)
+  13: { model: 'road_t_cross',  rot: Math.PI },        // Connects South (+Z) + West (-X) + North (-Z)
+  14: { model: 'road_t_cross',  rot: -Math.PI / 2 },   // Connects East (+X) + South (+Z) + West (-X)
   15: { model: 'road_cross',    rot: 0 }               // Connects North + East + South + West (4-way)
 };
 ```
@@ -105,7 +105,8 @@ const ROAD_AUTOTILE_TABLE = {
 ### 5.1 Front Door Auto-Facing Math
 Every building model's front door points natively toward **`+Z`** in Three.js coordinates.
 For any building placed at `(hx, hy)`:
-1. Scan orthogonal neighbors in priority order: South `(hx, hy + 1)`, North `(hx, hy - 1)`, East `(hx + 1, hy)`, West `(hx - 1, hy)`.
+1. Use item.door_side if present ('s' -> South, 'e' -> East, 'w' -> West, 'n' -> North).
+   Otherwise, scan orthogonal neighbors in canonical exporter priority: South (hx, hy + 1), East (hx + 1, hy), West (hx - 1, hy), North (hx, hy - 1).
 2. Let `(rx, ry)` be the first neighboring tile with `kind === 'road'`.
 3. Compute direction vector from house to road:
    `const dx = rx - hx;`  // in {-1, 0, 1}
