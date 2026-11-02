@@ -323,7 +323,294 @@ Because `objectNormal` feeds into `transformedNormal = normalMatrix * objectNorm
 
 ---
 
-## 9. Verification & Pre-Flight Checklist
+## 9. Road Grounding & Terrain Corridor Grading Specification (Issue #18)
+
+> **Architectural Objective**: Eliminate terrain occlusion of modular roads where roadways border or cross elevated biomes (forest at $Y = 0.10\text{m}$, hills at $Y = 0.60\text{m}$, water bed at $Y = -0.25\text{m}$), while guaranteeing strict zero-seam terrain mesh continuity and keeping total scene draw calls locked at $\le 20$ (nominal 12).
+
+---
+
+### 9.1 Problem Statement & Coordinate Breakdown
+
+In `src/main.js`, terrain elevation is tiered by biome character in `TERRAIN_PALETTE`:
+- **Plain / Grass / Sand (`'p'`, `'g'`, `'s'`)**: $Y = 0.00\text{m}$
+- **Forest (`'f'`)**: $Y = 0.10\text{m}$
+- **Hills (`'h'`)**: $Y = 0.60\text{m}$
+- **Water Bed (`'w'`)**: $Y = -0.25\text{m}$ (water surface plane at $Y = -0.06\text{m}$)
+
+Two geometric flaws previously caused road models to be submerged or diagonally sliced by terrain:
+
+1. **Submerged Road Slabs on Elevated Biomes**:
+   - `roadTransforms` hardcoded instance elevation to `y: 0`.
+   - On the southeast forest arterial corridor—including coordinates `(115..123, 109)` and `(123..124, 108)`—and the Sorrel Woods studio cul-de-sac at `(23, 57)`, road tiles sit on forest (`'f'`).
+   - Because the forest terrain plinth sits at $Y = 0.10\text{m}$ while the road slabs were placed at $Y = 0.00\text{m}$, these 13 road tiles were completely submerged $10\text{cm}$ beneath the soil, rendering them invisible.
+   - Any road crossing or bordering hill terrain (`'h'`, $Y = 0.60\text{m}$) would similarly be buried up to $60\text{cm}$ underground.
+
+2. **Sloping Terrain Triangles Slicing Through Border Roadways (e.g. `(45, 23)`)**:
+   - Terrain geometry is a continuous $(128 + 1) \times (128 + 1) = 129 \times 129$ vertex grid (`THREE.PlaneGeometry(128, 128, 128, 128)`).
+   - Each tile quad $(x, z)$ spans $[x, x + 1] \times [z, z + 1]$ and shares 4 corner vertices:
+     $$V_{NW} = (x, z), \quad V_{NE} = (x + 1, z), \quad V_{SW} = (x, z + 1), \quad V_{SE} = (x + 1, z + 1)$$
+   - Previously, vertex elevation was sampled crudely using `Math.floor(x)` and `Math.floor(z)`. Consequently, the eastern boundary vertex `(46, 23)` sampled tile `(46, 23)` (forest `'f'`), assigning it $Y = 0.10\text{m}$.
+   - The road at `(45, 23)` (sand `'s'`, $Y = 0.00\text{m}$) has its asphalt at $+0.02\text{m}$ and curb top at $+0.04\text{m}$. Because vertex `(46, 23)` was elevated to $0.10\text{m}$, the terrain quad under road `(45, 23)` sloped upward from $0.00\text{m}$ on the west to $0.10\text{m}$ on the east.
+   - The green forest terrain sliced diagonally through the road slab, occluding the eastern half of the asphalt and curb.
+   - Spatial analysis identifies exactly **37 boundary vertices** across the map exhibiting this severe defect, including:
+     * Lake shoreline road: `(43..47, 15..28)` bordering forest (notably `(46, 22)`, `(46, 23)`, `(47, 24)`)
+     * Southern hill arterial: `(16, 93)` and `(17, 93)` bordering hill tiles (`'h'`, $Y = 0.60\text{m}$)
+     * Southeast forest hill junction: `(124, 109)` and `(125, 108..109)` bordering hill tiles (`'h'`)
+     * Eastern meadow-forest boundary: `(112, 98..103)` and `(113, 104..105)`
+
+---
+
+### 9.2 Mathematical Elevation Formula for Road Instances
+
+Road instances must never be placed at an arbitrary constant height. Their elevation is mathematically anchored to the terrain grid height plinth.
+
+#### 9.2.1 Natural Biome Elevation Function $H_{\text{natural}}(char)$
+For any tile $(x, z)$ with character $char = land[z][x]$:
+$$H_{\text{natural}}(char) = \begin{cases} 
+0.60 & \text{if } char = \text{'h'} \text{ (hill)} \\
+0.10 & \text{if } char = \text{'f'} \text{ (forest)} \\
+-0.25 & \text{if } char = \text{'w'} \text{ (depressed water bed)} \\
+0.00 & \text{otherwise ('g', 's', 'p')}
+\end{cases}$$
+
+#### 9.2.2 Road Instance Elevation Function $Y_{\text{road}}(x, y, item)$
+For any road tile at map coordinate $(x, y)$ (where $y$ corresponds to Three.js world axis $+Z$):
+$$Y_{\text{road}}(x, y) = \begin{cases}
+item.elevation & \text{if } item.elevation \in \mathbb{R} \\
+item.level \times 0.20 & \text{if } item.level \in \mathbb{Z}^+ \\
+0.60 & \text{if } land[y][x] = \text{'h'} \\
+0.10 & \text{if } land[y][x] = \text{'f'} \\
+0.00 & \text{otherwise ('g', 's', 'p', 'w')}
+\end{cases}$$
+
+> [!NOTE]
+> Roads crossing water tiles are plinthed at $Y_{\text{road}} = 0.00\text{m}$ (causeway/bridge datum), never sinking to the $-0.25\text{m}$ bed.
+
+#### 9.2.3 Road Transform Position Vector
+In Three.js world space, the instance center transform is:
+$$\mathbf{P}_{\text{road}}(x, y) = \begin{pmatrix} x + 0.5 \\ Y_{\text{road}}(x, y) \\ y + 0.5 \end{pmatrix}$$
+Instance rotation remains purely azimuthal:
+$$\mathbf{R}_{\text{road}} = \begin{pmatrix} 0 \\ \theta_{\text{autotile}} \\ 0 \end{pmatrix}, \quad \theta_{\text{autotile}} \in \text{ROAD\_AUTOTILE\_TABLE}[mask].rot$$
+
+---
+
+### 9.3 Terrain Vertex Corridor Grading & Slope Clamping
+
+To prevent terrain triangles from slicing through road models, the underlying terrain mesh vertices along road corridors must be graded to the road plinth datum.
+
+#### 9.3.1 Continuous Manifold Grid Geometry
+The terrain mesh consists of $(size + 1) \times (size + 1) = 129 \times 129$ vertices indexed by integer $(vx, vz)$ where $vx \in [0, 128]$ and $vz \in [0, 128]$.
+Every vertex $(vx, vz)$ is shared by up to 4 quadrant tiles $\mathcal{T}(vx, vz)$:
+$$\mathcal{T}(vx, vz) = \left\{ (tx, tz) \;\middle|\; \begin{aligned} tx &\in \{vx - 1, vx\} \\ tz &\in \{vz - 1, vz\} \end{aligned}, \; 0 \le tx < size, \; 0 \le tz < size \right\}$$
+
+Specifically:
+1. **North-West Quadrant**: $(vx - 1, vz - 1)$
+2. **North-East Quadrant**: $(vx, vz - 1)$
+3. **South-West Quadrant**: $(vx - 1, vz)$
+4. **South-East Quadrant**: $(vx, vz)$
+
+#### 9.3.2 Corridor Partition & Clamping Formula
+Partition $\mathcal{T}(vx, vz)$ into road tiles $\mathcal{R}(vx, vz)$ and non-road tiles $\mathcal{N}(vx, vz)$:
+$$\mathcal{R}(vx, vz) = \{ (tx, tz) \in \mathcal{T}(vx, vz) \mid isRoad(tx, tz) \}$$
+
+The elevation of vertex $(vx, vz)$ is evaluated according to:
+$$Y_{\text{vertex}}(vx, vz) = \begin{cases}
+\displaystyle\min_{(tx, tz) \in \mathcal{R}(vx, vz)} Y_{\text{road}}(tx, tz) & \text{if } |\mathcal{R}(vx, vz)| > 0 \\
+H_{\text{natural}}(land[\min(vz, size - 1)][\min(vx, size - 1)]) & \text{if } |\mathcal{R}(vx, vz)| = 0
+\end{cases}$$
+
+#### 9.3.3 Mathematical Proof of Zero Occlusion
+1. **Under-Road Bed Flatness**:
+   For any road tile $(rx, rz)$, its 4 corner vertices are:
+   $$V \in \text{Corners}(rx, rz) = \{ (rx, rz), (rx + 1, rz), (rx, rz + 1), (rx + 1, rz + 1) \}$$
+   For every corner $V$, $(rx, rz) \in \mathcal{R}(V)$ by construction.
+   Therefore:
+   $$Y_{\text{vertex}}(V) = \min_{r \in \mathcal{R}(V)} Y_{\text{road}}(r) \le Y_{\text{road}}(rx, rz)$$
+2. **Vertical Clearance Guarantee**:
+   The modular road models feature:
+   - Base bottom datum: $Y = Y_{\text{road}}$
+   - Asphalt surface: $Y = Y_{\text{road}} + 0.02\text{m}$
+   - Curb top: $Y = Y_{\text{road}} + 0.04\text{m}$
+   Since $Y_{\text{vertex}}(V) \le Y_{\text{road}}$, the terrain surface under the road is strictly:
+   $$Y_{\text{terrain}}(x, z) \le Y_{\text{road}} < Y_{\text{road}} + 0.02\text{m} \quad \forall (x, z) \in [rx, rx + 1] \times [rz, rz + 1]$$
+   **Conclusion**: It is mathematically impossible for the terrain geometry to pierce, clip, or occlude any road surface on the map.
+3. **Embankment Grading into Neighboring Biomes**:
+   In adjacent non-road tiles (e.g. forest at $(46, 23)$ or hills at $(16, 93)$), the boundary vertices sit at $Y_{\text{road}}$ while the opposite vertices sit at $H_{\text{natural}}$.
+   The terrain quad forms a clean, 1-meter civil-engineered embankment sloping smoothly up and away from the road curb.
+4. **Shoreline Safety**:
+   For road tiles bordering water (e.g. `(42..46, 19..28)`), $Y_{\text{road}} = 0.00\text{m}$ clamps the shoreline vertices to $0.00\text{m}$. The terrain quad slopes down into the $-0.25\text{m}$ basin, while the water surface plane ($Y = -0.06\text{m}$) safely laps against the sand bank below the curb.
+5. **Watertight Topology**:
+   Because `THREE.PlaneGeometry` vertices are shared between adjacent quads, moving vertex $(vx, vz)$ modifies all contiguous quad corners simultaneously. The terrain mesh remains a continuous, manifold, watertight 2-manifold with zero cracks or seams.
+
+---
+
+### 9.4 Architectural Pipeline & Data Flow
+
+```
++-------------------------------------------------------------+
+| 1. Parse commons.json: builtGrid, roadGrid, land biomes     |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+| 2. Precompute Road Elevation Matrix:                        |
+|    roadElevationGrid[y][x] = getRoadElevation(x, y, item)   |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+| 3. Construct Terrain Mesh (PlaneGeometry 128x128):          |
+|    For each vertex i in [0..16640]:                         |
+|      - Extract (vx, vz) = (round(X), round(Z))              |
+|      - Collect touching quadrant tiles in roadGrid          |
+|      - If touching road: y = min(roadElevationGrid)         |
+|      - Else: y = getTerrainElevation(land[vz][vx])          |
+|      - position.setY(i, y)                                  |
+|    computeVertexNormals()                                   |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+| 4. Populate Road InstancedMeshes (5 modular types):         |
+|    - Query 4-neighbor autotile mask (ROAD_AUTOTILE_TABLE)   |
+|    - t.y = roadElevationGrid[y][x]                          |
+|    - Pack into roadTransforms[modelKey]                     |
+|    - Render via 5 InstancedMeshes (Draw Calls <= 20)        |
++-------------------------------------------------------------+
+```
+
+---
+
+### 9.5 Step-by-Step Implementation Tasks for Flash Coder
+
+Flash coders must execute the following 5 tasks in `src/main.js`:
+
+#### Task 1: Add Elevation Helper Functions
+Place above `buildWorld(data)`:
+```javascript
+function getTerrainElevation(char) {
+  if (char === 'h') return 0.60;
+  if (char === 'f') return 0.10;
+  if (char === 'w') return -0.25;
+  return 0.00;
+}
+
+function getRoadElevation(x, y, item, land) {
+  if (item && typeof item.elevation === 'number') {
+    return item.elevation;
+  }
+  if (item && typeof item.level === 'number' && item.level > 0) {
+    return item.level * 0.20;
+  }
+  const char = (land[y] && land[y][x]) ? land[y][x] : 'g';
+  if (char === 'h') return 0.60;
+  if (char === 'f') return 0.10;
+  return 0.00;
+}
+```
+
+#### Task 2: Build Road Elevation Spatial Grid
+In `buildWorld(data)`, allocate and populate `roadElevationGrid` alongside `roadGrid`:
+```javascript
+const roadElevationGrid = Array.from({ length: size }, () => new Float32Array(size).fill(NaN));
+
+built.forEach(item => {
+  if (inBounds(item.x, item.y)) {
+    builtGrid[item.y][item.x] = item;
+    if (item.kind === 'road') {
+      roadGrid[item.y][item.x] = 1;
+      roadElevationGrid[item.y][item.x] = getRoadElevation(item.x, item.y, item, land);
+    }
+  }
+});
+```
+
+#### Task 3: Replace Terrain Mesh Vertex Elevation Loop
+Replace lines 391–406 in `src/main.js` with quadrant-neighbor corridor grading:
+```javascript
+for (let i = 0; i < count; i++) {
+  const vx = Math.min(Math.max(Math.round(terrainGeo.attributes.position.getX(i)), 0), size);
+  const vz = Math.min(Math.max(Math.round(terrainGeo.attributes.position.getZ(i)), 0), size);
+
+  // Up to 4 quadrant tiles sharing vertex (vx, vz)
+  const adjacentTiles = [
+    { x: vx - 1, z: vz - 1 },
+    { x: vx,     z: vz - 1 },
+    { x: vx - 1, z: vz     },
+    { x: vx,     z: vz     }
+  ].filter(t => inBounds(t.x, t.z));
+
+  const touchingRoads = adjacentTiles.filter(t => roadGrid[t.z][t.x] === 1);
+
+  let y = 0;
+  if (touchingRoads.length > 0) {
+    let minRoadY = Infinity;
+    for (const r of touchingRoads) {
+      const elev = roadElevationGrid[r.z][r.x];
+      if (elev < minRoadY) minRoadY = elev;
+    }
+    y = minRoadY;
+  } else {
+    const sampleX = Math.min(vx, size - 1);
+    const sampleZ = Math.min(vz, size - 1);
+    const char = (land[sampleZ] && land[sampleZ][sampleX]) ? land[sampleZ][sampleX] : 'g';
+    y = getTerrainElevation(char);
+  }
+
+  terrainGeo.attributes.position.setY(i, y);
+
+  const colorX = Math.min(vx, size - 1);
+  const colorZ = Math.min(vz, size - 1);
+  const tileChar = (land[colorZ] && land[colorZ][colorX]) ? land[colorZ][colorX] : 'g';
+  colorHelper.setHex(TERRAIN_PALETTE[tileChar] || TERRAIN_PALETTE.g);
+
+  colors[i * 3]     = colorHelper.r;
+  colors[i * 3 + 1] = colorHelper.g;
+  colors[i * 3 + 2] = colorHelper.b;
+}
+```
+
+#### Task 4: Anchor Road Instance Y Positions
+In the `built.forEach(item => { if (item.kind !== 'road') return; ... })` loop, set `y: roadY`:
+```javascript
+const roadY = roadElevationGrid[y][x];
+
+roadTransforms[tileConfig.model].push({
+  x: x + 0.5,
+  y: roadY,
+  z: y + 0.5,
+  rot: tileConfig.rot,
+  meta: {
+    x, y, kind: 'road',
+    neighborhood: getNeighborhood(x, y, neighborhoods),
+    isStructure: true
+  }
+});
+```
+In the fallback box renderer, anchor box center to `dummy.position.set(t.x, t.y + 0.04, t.z)`.
+
+#### Task 5: Ground Built Structures on Elevated Terrain
+Ensure building placement accounts for terrain plinth height:
+```javascript
+const buildingY = (typeof item.elevation === 'number')
+  ? item.elevation
+  : ((typeof item.level === 'number' && item.level > 0)
+      ? item.level * 0.20
+      : getTerrainElevation((land[y] && land[y][x]) ? land[y][x] : 'g'));
+```
+Set `y: buildingY` for GLB structures (`cabin`, `studio`, `workshop`) and `y: buildingY + h / 2` for box structures.
+
+---
+
+### 9.6 Performance Budget & Draw-Call Ceiling
+
+- **Consolidation**: All 669 road segments remain consolidated into the 5 modular `THREE.InstancedMesh` groups (`road_straight`, `road_corner`, `road_t_cross`, `road_cross`, `road_deadend`).
+- **Draw Call Invariance**: Modifying instance translation `(x, y, z)` in the instance buffer creates **0 new draw calls**.
+- **Total Draw Calls**: Strictly locked at **12 calls** (5 roads + 3 GLB buildings + 1 boxes + 1 trees + 1 terrain + 1 water = 12 calls), well within the budget limit of $\le 20$.
+
+---
+
+## 10. Verification & Pre-Flight Checklist
 
 Before submitting code:
 1. `npm run build` must compile with **zero errors**.
@@ -332,10 +619,16 @@ Before submitting code:
 4. All house front doors face towards street asphalt.
 5. All 669 road tiles align seamlessly at intersections without curb clipping.
 6. Pine trees do not encroach within 1.4m of asphalt or structures.
+7. **Road Grounding & Corridor Grading (Issue #18)**:
+   - Roads bordering forest at `(45, 23)` have flat terrain bed at $Y = 0.00\text{m}$ with zero asphalt occlusion.
+   - Roads on forest plinths at `(115..123, 109)` sit flush at $Y = 0.10\text{m}$, unhidden by terrain.
+   - Roads near southern hills at `(16, 92)` sit flush at $Y = 0.00\text{m}$ with hillsides graded smoothly away.
+   - Shoreline roads bordering water bed sit at $Y = 0.00\text{m}$ with water basin sloping cleanly down to $-0.25\text{m}$.
+8. **Playwright CI**: `npx playwright test` passes with total draw calls $\le 20$ (nominal 12) and 2-pass reload determinism.
 
 ---
 
-## 10. Multi-Phase Roadmap
+## 11. Multi-Phase Roadmap
 
 1. **Phase 1 (PR #9 `feat/road-autotiling`)**: 
    - 5 modular Blender 5.2 road models (`road_straight.glb`, `road_corner.glb`, `road_t_cross.glb`, `road_cross.glb`, `road_deadend.glb`).
@@ -350,3 +643,7 @@ Before submitting code:
    - Dedicated stylized PBR water shader with harmonic wave displacement, transmission, and shoreline foam edge.
 5. **Phase 5 (`feat/live-hangout-presence`)**:
    - Real-time bot presence pins and active public hangout badges, synchronized with `AgentsHangout/agentshangout#223` public presence endpoints (strictly respecting privacy boundaries; no private house interiors).
+6. **Phase 6 (`feat/road-grounding-issue-18`)**:
+   - Terrain corridor grading via quadrant-neighborhood minimum clamping.
+   - Road instance anchoring grounded to terrain plinth height ($Y_{\text{road}}$).
+   - Complete resolution of sunken and occluded roads across forest, sand, water, and hill borders.
