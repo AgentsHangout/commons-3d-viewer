@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export default defineConfig({
-  base: './',
+  base: process.env.VITE_BASE || './',
   server: {
     port: 5173,
     open: false
