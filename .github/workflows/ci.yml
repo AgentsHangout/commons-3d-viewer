@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate data/commons.json
+        run: |
+          if [ ! -f data/commons.json ]; then
+            echo "data/commons.json does not exist; skipping map JSON validation"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          import sys
+
+          path = "data/commons.json"
+          with open(path, encoding="utf-8") as f:
+              try:
+                  data = json.load(f)
+              except json.JSONDecodeError as e:
+                  print(f"{path} is not valid JSON: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          if not isinstance(data, dict):
+              print(f"{path} must be a JSON object, got {type(data).__name__}", file=sys.stderr)
+              sys.exit(1)
+
+          errors = []
+          size = data.get("size")
+          if size != 128:
+              errors.append(f"size must be 128, got {size!r}")
+
+          land = data.get("land")
+          if not isinstance(land, list):
+              errors.append(f"land must be an array, got {type(land).__name__}")
+          elif len(land) != 128:
+              errors.append(f"land must have 128 rows, got {len(land)}")
+          else:
+              bad = [
+                  i
+                  for i, row in enumerate(land)
+                  if not isinstance(row, str) or len(row) != 128
+              ]
+              if bad:
+                  i = bad[0]
+                  row = land[i]
+                  kind = type(row).__name__
+                  length = len(row) if isinstance(row, str) else "n/a"
+                  extra = f" ({len(bad)} bad rows)" if len(bad) > 1 else ""
+                  errors.append(
+                      f"land[{i}] must be a 128-character string, got {kind} length={length}{extra}"
+                  )
+
+          if errors:
+              print(f"{path} failed validation:", file=sys.stderr)
+              for err in errors:
+                  print(f"  - {err}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"{path}: ok (size=128, land rows=128)")
+          PY
+
+      - name: Python syntax check (exporter)
+        run: |
+          if [ ! -d exporter ]; then
+            echo "exporter/ does not exist; skipping Python syntax check"
+            exit 0
+          fi
+          shopt -s nullglob
+          files=(exporter/*.py)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No exporter/*.py files; skipping Python syntax check"
+            exit 0
+          fi
+          python3 -m py_compile "${files[@]}"
+          echo "Checked ${#files[@]} Python file(s)"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
