@@ -174,18 +174,90 @@ function createInstancedRoads(gltfScene, transformsList) {
 
 ---
 
-## 7. Organic Tree Scatter with Poisson Clearance Buffer
+## 7. Phase 3: Nature & Organic Tree Scatter Specification (`feat/nature-scatter`)
 
-### 7.1 Clearance Constraints
-1. **Forest Tile Only**: `land[z][x] === 'f'`.
-2. **Road / Structure Clearance**: Candidate `(tx, tz)` must be `>= 1.4 units` away from every tile in `data.built`.
-3. **Inter-Tree Spacing**: Candidate `(tx, tz)` must be `>= 1.8 units` away from every other tree.
-4. **Organic Jitter**:
-   `posX = tx + 0.5 + (seededRandom() - 0.5) * 0.35;`
-   `posZ = tz + 0.5 + (seededRandom() - 0.5) * 0.35;`
-5. **Scale & Yaw Variation**:
-   `scale = 0.17 + seededRandom() * 0.05;`
-   `rotationY = seededRandom() * Math.PI * 2;`
+### 7.1 Ecological Canopy Zones & Multi-Tier Clustering
+To avoid artificial monoculture grids, pine trees (`pine_tree.glb`) are scattered across forest tiles (`land[z][x] === 'f'`) using deterministic multi-tier Poisson-disc clustering:
+
+1. **Canopy Classification by Neighborhood Density**:
+   For each forest tile `(tx, tz)`:
+   - Count the number of 8-connected orthogonal and diagonal neighbors that are also `'f'`:
+     ```javascript
+     let forestNeighbors = 0;
+     for (let dz = -1; dz <= 1; dz++) {
+       for (let dx = -1; dx <= 1; dx++) {
+         if (dx === 0 && dz === 0) continue;
+         const nx = tx + dx, nz = tz + dz;
+         if (inBounds(nx, nz) && land[nz][nx] === 'f') forestNeighbors++;
+       }
+     }
+     ```
+   - **Tier 1: Deep Interior Forest** (`forestNeighbors >= 7`):
+     - Mature high-density canopy.
+     - Spacing cell size: `minDist = 1.4m`.
+     - Tree scale: `0.190 - 0.240` (large mature pines).
+   - **Tier 2: Mid-Forest Grove** (`forestNeighbors >= 4 && forestNeighbors < 7`):
+     - Medium-density grove.
+     - Spacing cell size: `minDist = 1.7m`.
+     - Tree scale: `0.160 - 0.200`.
+   - **Tier 3: Woodland Ecotone / Border Treeline** (`forestNeighbors < 4`):
+     - Sparser woodland transition to meadows, roads, and clearings.
+     - Spacing cell size: `minDist = 2.0m`.
+     - Tree scale: `0.140 - 0.170` (younger trees, lower canopy).
+
+### 7.2 Strict Clearance Math
+Trees must never clip into road asphalt, concrete curbs, building walls, or water:
+1. **Built Structure & Road Buffer (`>= 1.4m`)**:
+   - For candidate world position `(posX, posZ)`:
+     Candidate must maintain Euclidean distance $\ge 1.4\text{m}$ from the center of any tile with `builtGrid[by][bx] !== null`:
+     $\sqrt{(posX - (bx + 0.5))^2 + (posZ - (by + 0.5))^2} \ge 1.40$
+   - Since tile radius to corners is $\sqrt{0.5^2 + 0.5^2} \approx 0.707\text{m}$ and pine branch radius is $1.9\text{m} \times 0.24 \approx 0.456\text{m}$, a $1.40\text{m}$ buffer strictly guarantees positive clearance:
+     $1.40\text{m} - 0.707\text{m} - 0.456\text{m} = \mathbf{0.237\text{m} \text{ (clear)}}.$
+2. **Water Shoreline Buffer (`>= 0.85m`)**:
+   - Trees must never spawn directly on water or within $0.85\text{m}$ of any water tile (`land[z][x] === 'w'`) to eliminate floating foliage along the shoreline.
+
+### 7.3 Organic Transforms & Grounding Elevation
+1. **Elevation Grounding**:
+   - Forest terrain elevation in `TERRAIN_PALETTE` is elevated at **`Y = 0.10m`** (`char === 'f' ? y = 0.1 : ...`).
+   - Trees must be placed at **`y: 0.10`** (NOT `y: 0.00`). Placing trees at `y: 0.00` causes the trunk foundation to sink 10cm into the soil.
+2. **Organic Yaw Rotation**:
+   - Full $360^\circ$ rotation: `rot: rng() * Math.PI * 2`.
+3. **Organic Jitter & Scale**:
+   - Candidate offset inside tile:
+     $posX = tx + 0.5 + (rng() - 0.5) \times 0.45$
+     $posZ = tz + 0.5 + (rng() - 0.5) \times 0.45$
+   - Scale jitter:
+     $scale = minScale + rng() \times (maxScale - minScale)$
+     Strictly clamped in range `[0.140, 0.240]`.
+
+### 7.4 Single `THREE.InstancedMesh` Performance Pipeline
+- All pine trees across the entire 128x128 map MUST be packed into a single `THREE.InstancedMesh`.
+- Total scene draw calls MUST NOT increase — draw calls stay locked at **11 calls** (well under the 20-call budget).
+- Options for `createInstancedFromGltf`:
+  ```javascript
+  scene.add(createInstancedFromGltf(loadedModels['tree'], treeTransforms, {
+    castShadow: true,
+    receiveShadow: true,
+    interactive: false
+  }));
+  ```
+
+### 7.5 Flash Guardrails (Common Junior Model Pitfalls)
+1. **Matrix Update**: When iterating over `treeTransforms`, every instance requires:
+   ```javascript
+   dummy.position.set(t.x, t.y, t.z);
+   dummy.rotation.y = t.rot;
+   dummy.scale.set(t.scale, t.scale, t.scale);
+   dummy.updateMatrix();
+   iMesh.setMatrixAt(i, dummy.matrix);
+   ```
+   *Flash pitfall*: Omitting `dummy.updateMatrix()` or `dummy.scale.set` leads to identity matrices or invisible meshes.
+2. **Bounding Sphere Recomputation**:
+   Must call `iMesh.instanceMatrix.needsUpdate = true` and `iMesh.computeBoundingSphere()` after the transform loop. Otherwise, Three.js camera frustum culling will clip large sections of the forest when the camera rotates.
+3. **Deterministic PRNG**:
+   Must exclusively use `createSeededRandom(12345)`. Never use `Math.random()`, which breaks snapshot testing and causes CI jitter.
+4. **Spatial Hash Grid Sizing**:
+   The spatial lookup grid for Poisson spacing must use `const cellSize = minDist`. Bounds check `gx >= 0 && gx < gridDim && gz >= 0 && gz < gridDim` before array indexing to prevent out-of-bounds `TypeError`.
 
 ---
 
