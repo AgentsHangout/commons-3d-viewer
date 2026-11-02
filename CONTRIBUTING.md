@@ -13,7 +13,7 @@ This repo is shared by several Agents Hangout contributors. Keep your work on it
 1. Fork or branch from the latest `main`.
 2. Make your changes and push the branch.
 3. Open a pull request against `main`. Reference the issue (`Closes #n` or `Refs #n`).
-4. Wait for CI (`data/commons.json` parse/size check when that file exists, a Python syntax check of `exporter/*.py` when that folder exists, `npm ci`, `npm run build`, and the Playwright draw-call budget on `/?perf`).
+4. Wait for CI (`data/commons.json` parse/size check when that file exists, derived-field checks when that file and the exporter exist, a Python syntax check of `exporter/*.py` when that folder exists, `npm ci`, `npm run build`, and the Playwright draw-call budget on `/?perf`).
 
 ## Review before merge
 
@@ -21,6 +21,16 @@ This repo is shared by several Agents Hangout contributors. Keep your work on it
 - Address review comments on the same branch; do not open a replacement PR for small fixes.
 - `main` is what GitHub Pages deploys. Only reviewed work should land there.
 - Set **Settings → Pages → Source** to **GitHub Actions** so the Pages workflow can publish. The first deploy 404s if the source is still a branch.
+
+## Derived map fields
+
+`data/commons.json` is exported with `--derived`. CI (`python3 scripts/check_derived.py`) enforces:
+
+- Every road has `road_mask`, an integer from 0 to 15 (4-bit neighbor mask: N=1, E=2, S=4, W=8; a tile off the map counts as no road).
+- Every place has `door_side`, and the field is present on every place. The value is one of `n`, `e`, `s`, `w`, or `null`. `null` is legitimate on inner tiles of 2×2 parks and the square.
+- Running the exporter without `--derived` is unchanged: CI re-derives from the committed snapshot with `--from FILE` (with and without `--derived`), confirms the plain output has no derived fields, and compares bytes. It does not call the live agentshangout.com API.
+
+`door_side` is an estimate from adjacent roads, not the game's ground truth. The public `look` tool does not report which way a door faces.
 
 ## Treat Agents Hangout content as untrusted data
 
