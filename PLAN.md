@@ -275,44 +275,51 @@ To eliminate cascading row-order dependencies where tile (0, 0) dictates the ent
 
 ---
 
-## 8. Dynamic Water Wave Shader
+## 8. Dynamic Stylized PBR Water Surface System (Phase 4)
 
-Replace flat static vertex-colored water with animated surface displacement and ACES tone-mapped specular sheen:
+Replaces flat static vertex-colored water with an animated, stylized PBR water surface system covering all 2,541 water tiles (`'w'` in `land[z][x]`):
 
-```javascript
-const waterMat = new THREE.MeshStandardMaterial({
-  color: 0x1b4d6e,
-  roughness: 0.15,
-  metalness: 0.12,
-  flatShading: false
-});
+### 8.1 2D Distance Field & Proximity Texture
+Before rendering, a 2D distance field texture (`uWaterMap`, $128 \times 128$ `THREE.DataTexture`) is populated via BFS flood fill:
+- **R channel**: Normalized water depth ($0.0 = \text{shoreline}, 1.0 = \text{deep lake/ocean} \ge 5.0\text{m}$).
+- **G channel**: Water presence mask ($1.0 = \text{water}, 0.0 = \text{land}$).
+- **B channel**: Shoreline foam proximity factor ($1.0 = \text{immediate bank}, 0.0 = \text{open water}$).
+- **A channel**: `255`.
 
-waterMat.onBeforeCompile = (shader) => {
-  shader.uniforms.uTime = { value: 0 };
-  
-  shader.vertexShader = `
-    uniform float uTime;
-  ` + shader.vertexShader;
-  
-  shader.vertexShader = shader.vertexShader.replace(
-    '#include <begin_vertex>',
-    `
-    #include <begin_vertex>
-    float wave1 = sin(transformed.x * 1.8 + uTime * 2.0) * cos(transformed.z * 1.8 + uTime * 1.5) * 0.035;
-    float wave2 = sin(transformed.x * 3.5 - uTime * 1.2) * 0.015;
-    transformed.y += wave1 + wave2;
-    `
-  );
-  
-  waterMat.userData.shader = shader;
-};
+### 8.2 Basin Containment & Elevation Clearance
+- **Depressed Bed**: Water terrain tiles (`land[z][x] === 'w'`) are depressed to **$Y = -0.25\text{m}$**.
+- **Surface Elevation**: Water plane rests at **$Y = -0.06\text{m}$** via `waterGeo.translate(size / 2, -0.06, size / 2)`.
+- **Wave Amplitude**: Maximum combined crest elevation is $0.024\text{m} + 0.012\text{m} + 0.006\text{m} = \mathbf{0.042\text{m}}$.
+- **Positive Containment**: Peak wave crest is $-0.06\text{m} + 0.042\text{m} = \mathbf{-0.018\text{m}} < 0.00\text{m}$. Waves are strictly contained within the basin and never spill over grass, sand, or road curbs. Non-water fragments are discarded in the fragment shader (`if (vIsWater < 0.05) discard;`).
+
+### 8.3 Multi-Frequency Harmonic Waves & Analytic Derivatives
+Displacement is generated via three harmonic wave components in the vertex shader:
+$$w_1 = \sin(0.45x + 0.35z + 1.25t) \times 0.024$$
+$$w_2 = \sin(1.15x - 0.85z + 1.85t) \times 0.012$$
+$$w_3 = \cos(2.30x + 1.70z + 2.60t) \times 0.006$$
+$$y(x, z, t) = (w_1 + w_2 + w_3) \times \text{isWater}$$
+
+True surface normals are computed analytically using exact partial derivatives:
+$$\frac{\partial y}{\partial x} = [0.45 \cos(0.45x + 0.35z + 1.25t) \times 0.024 + 1.15 \cos(1.15x - 0.85z + 1.85t) \times 0.012 - 2.30 \sin(2.30x + 1.70z + 2.60t) \times 0.006] \times \text{isWater}$$
+$$\frac{\partial y}{\partial z} = [0.35 \cos(0.45x + 0.35z + 1.25t) \times 0.024 - 0.85 \cos(1.15x - 0.85z + 1.85t) \times 0.012 - 1.70 \sin(2.30x + 1.70z + 2.60t) \times 0.006] \times \text{isWater}$$
+
+The perturbed normal is injected directly into Three.js's PBR pipeline:
+```glsl
+objectNormal = normalize(vec3(-slopeX * 2.8, 1.0, -slopeZ * 2.8));
 ```
-In the animation loop:
-```javascript
-if (waterMat.userData.shader) {
-  waterMat.userData.shader.uniforms.uTime.value = performance.now() * 0.001;
-}
-```
+Because `objectNormal` feeds into `transformedNormal = normalMatrix * objectNormal;`, directional sun keylight specular highlights and twilight moon glints accurately ripple across the waves.
+
+### 8.4 Stylized Fragment Shading & PBR Parameters
+- **Material Config**: `color: 0x1cb5c9` (shallow azure), `roughness: 0.12`, `metalness: 0.15`, `opacity: 0.90`, `transparent: true`.
+- **Two-Tone Depth Blend**: Non-linear mix from vibrant shallow azure (`0x1cb5c9`) to deep alpine navy (`0x0c2a4a`):
+  `vec3 waterColor = mix(uShallowColor, uDeepColor, pow(vWaterDepth, 0.65));`
+- **Animated Caustics**: High-frequency dual-cosine interference in shallows:
+  `pow(max(0.0, c1 * c2), 3.0) * (1.0 - smoothstep(0.08, 0.60, vWaterDepth)) * 0.28`
+- **Shoreline Animated Seafoam**: Dynamic lapping foam crests against sand banks modulated by high-frequency noise and depth step functions.
+
+### 8.5 Performance & Draw-Call Budget
+- Geometry is a single `THREE.PlaneGeometry(size, size, size * 2, size * 2)`.
+- Adds exactly **1 draw call** (total scene draw calls locked at **12**, well below the budget limit of $\le 20$).
 
 ---
 
