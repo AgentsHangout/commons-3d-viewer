@@ -596,138 +596,137 @@ function buildWorld(data) {
   scene.add(createInstancedBoxes(boxTransforms));
 
   // 4. Phase 3: Nature & Organic Tree Scatter Refinement (PLAN.md Section 7)
+  let treeTransforms = [];
   if (loadedModels['tree']) {
-    const MAX_TREES = 5000;
-    const cellSize = 1.35;
-    const gridDim = Math.ceil(size / cellSize);
-    const treeGrid = Array.from({ length: gridDim }, () => new Array(gridDim).fill(null));
-    const treeTransforms = [];
+    const rng = createSeededRandom(12345);
+    const forestCandidates = [];
 
     for (let z = 0; z < size; z++) {
       for (let x = 0; x < size; x++) {
-        if (!land[z] || land[z][x] !== 'f') continue;
-
-        // Coordinate-hashed spatial PRNG per tile (preserves stability across map edits)
-        const tileSeed = ((x * 73856093) ^ (z * 19349663) ^ 12345) >>> 0;
-        const rng = createSeededRandom(tileSeed);
-
-        // Multi-tier canopy density based on 8-connected forest neighbors
-        let forestNeighbors = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = x + dx, nz = z + dy;
-            if (inBounds(nx, nz) && land[nz][nx] === 'f') forestNeighbors++;
-          }
-        }
-
-        let minSpacing, minScale, maxScale, candidateCount;
-        if (forestNeighbors >= 7) {
-          // Tier 1: Deep Interior Forest (dense mature canopy, up to 2 trees per tile)
-          minSpacing = 1.35;
-          minScale = 0.190;
-          maxScale = 0.240;
-          candidateCount = 2;
-        } else if (forestNeighbors >= 4) {
-          // Tier 2: Mid-Forest Grove
-          minSpacing = 1.65;
-          minScale = 0.160;
-          maxScale = 0.200;
-          candidateCount = 1;
-        } else {
-          // Tier 3: Woodland Ecotone / Treeline (feathered transition into meadows)
-          minSpacing = 1.95;
-          minScale = 0.140;
-          maxScale = 0.170;
-          candidateCount = rng() < 0.60 ? 1 : 0;
-        }
-
-        for (let c = 0; c < candidateCount; c++) {
-          if (treeTransforms.length >= MAX_TREES) break;
-
-          const offsetX = (rng() - 0.5) * 0.70;
-          const offsetZ = (rng() - 0.5) * 0.70;
-          const posX = x + 0.5 + offsetX;
-          const posZ = z + 0.5 + offsetZ;
-
-          // 1. Built clearance: >= 1.0m to edge of all built tiles (roads & structures)
-          let tooCloseToBuilt = false;
-          for (let dy = -2; dy <= 2; dy++) {
-            for (let dx = -2; dx <= 2; dx++) {
-              const bx = x + dx, by = z + dy;
-              if (inBounds(bx, by) && builtGrid[by][bx]) {
-                const clampX = Math.max(bx, Math.min(posX, bx + 1));
-                const clampZ = Math.max(by, Math.min(posZ, by + 1));
-                const distSq = (posX - clampX) ** 2 + (posZ - clampZ) ** 2;
-                if (distSq < 1.0 * 1.0) {
-                  tooCloseToBuilt = true;
-                  break;
-                }
-              }
-            }
-            if (tooCloseToBuilt) break;
-          }
-          if (tooCloseToBuilt) continue;
-
-          // 2. Water clearance: >= 0.85m to edge of water tiles
-          let tooCloseToWater = false;
-          for (let dy = -1; dy <= 1; dy++) {
+        if (land[z] && land[z][x] === 'f') {
+          // Count 8-connected forest neighbors
+          let forestNeighbors = 0;
+          for (let dz = -1; dz <= 1; dz++) {
             for (let dx = -1; dx <= 1; dx++) {
-              const wx = x + dx, wz = z + dy;
-              if (inBounds(wx, wz) && land[wz][wx] === 'w') {
-                const clampX = Math.max(wx, Math.min(posX, wx + 1));
-                const clampZ = Math.max(wz, Math.min(posZ, wz + 1));
-                const distSq = (posX - clampX) ** 2 + (posZ - clampZ) ** 2;
-                if (distSq < 0.85 * 0.85) {
-                  tooCloseToWater = true;
-                  break;
-                }
-              }
+              if (dx === 0 && dz === 0) continue;
+              const nx = x + dx, nz = z + dz;
+              if (inBounds(nx, nz) && land[nz][nx] === 'f') forestNeighbors++;
             }
-            if (tooCloseToWater) break;
           }
-          if (tooCloseToWater) continue;
 
-          // 3. Inter-tree Poisson spacing via spatial hash grid
-          const gx = Math.floor(posX / cellSize);
-          const gz = Math.floor(posZ / cellSize);
-          let tooCloseToTree = false;
+          // Multi-Tier Canopy & Density (Argon Blueprint Item 1)
+          let minDist = 2.0;
+          let minScale = 0.140;
+          let maxScale = 0.170;
 
-          for (let dy = -2; dy <= 2; dy++) {
-            for (let dx = -2; dx <= 2; dx++) {
-              const cx = gx + dx, cz = gz + dy;
-              if (cx >= 0 && cx < gridDim && cz >= 0 && cz < gridDim) {
-                const neighbor = treeGrid[cz][cx];
-                if (neighbor) {
-                  const dSq = (posX - neighbor.x) ** 2 + (posZ - neighbor.z) ** 2;
-                  const req = Math.min(minSpacing, neighbor.spacing);
-                  if (dSq < req * req) {
-                    tooCloseToTree = true;
-                    break;
-                  }
-                }
-              }
-            }
-            if (tooCloseToTree) break;
+          if (forestNeighbors >= 7) {
+            minDist = 1.4;
+            minScale = 0.190;
+            maxScale = 0.240;
+          } else if (forestNeighbors >= 4) {
+            minDist = 1.7;
+            minScale = 0.160;
+            maxScale = 0.200;
           }
-          if (tooCloseToTree) continue;
 
-          // Scale & Yaw variation (height 0.140 - 0.240)
-          const scale = minScale + rng() * (maxScale - minScale);
-          const rotationY = rng() * Math.PI * 2;
-          const treeObj = {
-            x: posX,
-            y: 0.10, // Flush on elevated forest terrain plinth (char === 'f' is Y=0.10)
-            z: posZ,
-            scale,
-            rot: rotationY,
-            spacing: minSpacing
-          };
-
-          treeTransforms.push(treeObj);
-          treeGrid[gz][gx] = treeObj;
+          forestCandidates.push({ tx: x, tz: z, minDist, minScale, maxScale });
         }
       }
+    }
+
+    // Deterministic shuffle using seeded PRNG (PLAN.md Section 7)
+    for (let i = forestCandidates.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = forestCandidates[i];
+      forestCandidates[i] = forestCandidates[j];
+      forestCandidates[j] = tmp;
+    }
+
+    const cellSize = 1.4;
+    const gridDim = Math.ceil(size / cellSize);
+    const treeGrid = Array.from({ length: gridDim }, () => new Array(gridDim).fill(null));
+    treeTransforms = [];
+
+    for (const cand of forestCandidates) {
+      const { tx, tz, minDist, minScale, maxScale } = cand;
+
+      // Transformation offset inside tile (Argon Blueprint Item 4)
+      const posX = tx + 0.5 + (rng() - 0.5) * 0.45;
+      const posZ = tz + 0.5 + (rng() - 0.5) * 0.45;
+
+      // Strict Clearance 1: Built tiles / roads (Euclidean distance >= 1.40m from center)
+      let nearBuilt = false;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const bx = tx + dx, by = tz + dy;
+          if (inBounds(bx, by) && builtGrid[by][bx]) {
+            const dist = Math.hypot(posX - (bx + 0.5), posZ - (by + 0.5));
+            if (dist < 1.40) {
+              nearBuilt = true;
+              break;
+            }
+          }
+        }
+        if (nearBuilt) break;
+      }
+      if (nearBuilt) continue;
+
+      // Strict Clearance 2: Water shoreline (Euclidean distance >= 0.85m from any water tile)
+      let nearWater = false;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const wx = tx + dx, wz = tz + dy;
+          if (inBounds(wx, wz) && land[wz][wx] === 'w') {
+            const dist = Math.hypot(posX - (wx + 0.5), posZ - (wz + 0.5));
+            if (dist < 0.85) {
+              nearWater = true;
+              break;
+            }
+          }
+        }
+        if (nearWater) break;
+      }
+      if (nearWater) continue;
+
+      // Multi-tier Poisson spacing via spatial hash grid
+      const gx = Math.floor(posX / cellSize);
+      const gz = Math.floor(posZ / cellSize);
+      let tooClose = false;
+
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const cx = gx + dx, cz = gz + dy;
+          if (cx >= 0 && cx < gridDim && cz >= 0 && cz < gridDim) {
+            const neighbor = treeGrid[cz][cx];
+            if (neighbor) {
+              const d = Math.hypot(posX - neighbor.posX, posZ - neighbor.posZ);
+              if (d < Math.max(minDist, neighbor.minDist)) {
+                tooClose = true;
+                break;
+              }
+            }
+          }
+        }
+        if (tooClose) break;
+      }
+      if (tooClose) continue;
+
+      // Scale & Yaw variation (Argon Blueprint Item 4)
+      const scale = minScale + rng() * (maxScale - minScale);
+      const rot = rng() * Math.PI * 2;
+      const treeObj = {
+        x: posX,
+        y: 0.10, // Forest terrain plinth elevation is at Y = 0.10m (Argon Blueprint Item 3)
+        z: posZ,
+        scale,
+        rot,
+        posX,
+        posZ,
+        minDist
+      };
+
+      treeTransforms.push(treeObj);
+      treeGrid[gz][gx] = treeObj;
     }
 
     scene.add(createInstancedFromGltf(loadedModels['tree'], treeTransforms, {
@@ -741,7 +740,9 @@ function buildWorld(data) {
   if (urlParams.has('perf')) {
     window.__perf = {
       getDrawCalls: () => renderer.info.render.calls,
-      getInfo: () => ({ ...renderer.info.render })
+      getInfo: () => ({ ...renderer.info.render }),
+      getTreeCount: () => treeTransforms.length,
+      getFirstTree: () => treeTransforms[0] ? { x: treeTransforms[0].x, z: treeTransforms[0].z, scale: treeTransforms[0].scale } : null
     };
   }
 }

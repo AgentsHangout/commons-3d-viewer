@@ -95,4 +95,18 @@ test.describe('Commons draw-call budget', () => {
       `draw calls ${calls} exceed the budget of ${DRAW_CALL_LIMIT} (edit tests/perf.config.js or set DRAW_CALL_LIMIT)`
     ).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
   });
+
+  test('tree scatter generation is deterministic across frames and builds', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+    const res = await page.evaluate(() => ({
+      count: typeof window.__perf.getTreeCount === 'function' ? window.__perf.getTreeCount() : null,
+      first: typeof window.__perf.getFirstTree === 'function' ? window.__perf.getFirstTree() : null
+    }));
+    expect(res.count, 'expected tree count to be deterministic').toBe(785);
+    expect(res.first?.x).toBeCloseTo(74.63, 1);
+    expect(res.first?.z).toBeCloseTo(17.54, 1);
+  });
 });
