@@ -384,17 +384,69 @@ function buildWorld(data) {
   // Spatial Lookup Grid & In-Bounds Check
   const inBounds = (x, y) => x >= 0 && x < size && y >= 0 && y < size;
 
+  // 1. Build Spatial Lookups
   const builtGrid = Array.from({ length: size }, () => new Array(size).fill(null));
   const roadGrid = Array.from({ length: size }, () => new Uint8Array(size));
   const roadElevationGrid = Array.from({ length: size }, () => new Float32Array(size).fill(NaN));
+  const roadItems = [];
 
   built.forEach(item => {
     if (inBounds(item.x, item.y)) {
       builtGrid[item.y][item.x] = item;
       if (item.kind === 'road') {
         roadGrid[item.y][item.x] = 1;
-        roadElevationGrid[item.y][item.x] = getRoadElevation(item.x, item.y, item, land);
+        roadItems.push(item);
       }
+    }
+  });
+
+  // 2. Connected Component Minimum Datum Propagation (BFS / Flood Fill)
+  const roadItemMap = new Map();
+  roadItems.forEach(r => roadItemMap.set(`${r.x},${r.y}`, r));
+
+  const visitedRoads = new Uint8Array(size * size);
+
+  roadItems.forEach(startRoad => {
+    const startIndex = startRoad.y * size + startRoad.x;
+    if (visitedRoads[startIndex]) return;
+
+    const component = [];
+    const queue = [startRoad];
+    visitedRoads[startIndex] = 1;
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      component.push(cur);
+
+      const neighbors = [
+        { x: cur.x + 1, y: cur.y },
+        { x: cur.x - 1, y: cur.y },
+        { x: cur.x,     y: cur.y + 1 },
+        { x: cur.x,     y: cur.y - 1 }
+      ];
+
+      for (const n of neighbors) {
+        if (inBounds(n.x, n.y) && roadGrid[n.y][n.x] === 1) {
+          const nIndex = n.y * size + n.x;
+          if (!visitedRoads[nIndex]) {
+            visitedRoads[nIndex] = 1;
+            const neighborItem = roadItemMap.get(`${n.x},${n.y}`) || { x: n.x, y: n.y, kind: 'road' };
+            queue.push(neighborItem);
+          }
+        }
+      }
+    }
+
+    // Resolve minimum datum across the connected component
+    let compMinElev = Infinity;
+    for (const item of component) {
+      const baseElev = getRoadElevation(item.x, item.y, item, land);
+      if (baseElev < compMinElev) compMinElev = baseElev;
+    }
+
+    // Assign uniform step-free elevation to all connected road segments
+    for (const item of component) {
+      roadElevationGrid[item.y][item.x] = compMinElev;
     }
   });
 
@@ -863,7 +915,8 @@ function buildWorld(data) {
       getFirstTree: () => generatedTreeTransforms[0] ? { x: generatedTreeTransforms[0].x, z: generatedTreeTransforms[0].z, scale: generatedTreeTransforms[0].scale } : null,
       getTerrainMesh: () => terrainMesh,
       getRoadTransforms: () => roadTransforms,
-      getRoadElevation: (x, y) => roadElevationGrid[y] ? roadElevationGrid[y][x] : undefined
+      getRoadElevation: (x, y) => roadElevationGrid[y] ? roadElevationGrid[y][x] : undefined,
+      getRoadItems: () => roadItems
     };
   }
 }
