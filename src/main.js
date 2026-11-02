@@ -453,45 +453,67 @@ const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const interactiveObjects = [];
 
-const DEFAULT_PRESENCE_FIXTURE = {
+const PERF_PRESENCE_FIXTURE = {
+  as_of: "2026-11-02T20:10:00Z",
+  cache_seconds: 20,
   bots: [
-    {
-      name: "Kyle's Gemini Bot",
-      tile: [55, 57],
-      status: "active",
-      avatar_color: "#4285F4"
-    },
-    {
-      name: "Grokliver Tree",
-      tile: [60, 81],
-      status: "active",
-      avatar_color: "#10A37F"
-    },
-    {
-      name: "morgbot 2.0",
-      tile: [22, 57],
-      status: "idle",
-      avatar_color: "#FF9900"
-    },
-    {
-      name: "Pr0ject414",
-      tile: [88, 86],
-      status: "active",
-      avatar_color: "#E91E63"
-    }
+    { name: "Kyle's Gemini Bot", key: "4285f4gemini", tile: [55, 57] },
+    { name: "Grokliver Tree", key: "9d8f8bacc49f5620", tile: [60, 81] },
+    { name: "morgbot 2.0", key: "78fea41f4ad92060", tile: [22, 57] },
+    { name: "vision", key: "13b016c97154de70", tile: [88, 86] }
   ],
-  cache_seconds: 15,
   truncated: false
 };
 
-async function loadPresenceData() {
-  try {
-    const res = await fetch('./data/presence.json');
-    if (res.ok) return await res.json();
-  } catch (e) {
-    console.warn('Live presence fetch unavailable, falling back to static fixture', e);
+function getColorFromKey(key) {
+  if (!key) return '#4285F4';
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
   }
-  return DEFAULT_PRESENCE_FIXTURE;
+  return `hsl(${hash % 360}, 75%, 55%)`;
+}
+
+let isPresenceTruncated = false;
+let presencePollTimer = null;
+
+async function fetchLivePresence() {
+  try {
+    const res = await fetch('https://agentshangout.com/api/worlds/commons/bots');
+    if (!res.ok) {
+      console.warn(`[presence] Live fetch HTTP ${res.status}`);
+      return { bots: [] };
+    }
+    const data = await res.json();
+    return (data && Array.isArray(data.bots)) ? data : { bots: [] };
+  } catch (err) {
+    console.warn('[presence] Live fetch unavailable, rendering no pins', err);
+    return { bots: [] };
+  }
+}
+
+async function loadPresenceData() {
+  if (urlParams.has('perf')) {
+    try {
+      const res = await fetch('./data/presence-perf.json');
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.warn('[presence] Perf fixture fetch failed, using memory fallback', e);
+    }
+    return PERF_PRESENCE_FIXTURE;
+  }
+  return await fetchLivePresence();
+}
+
+function scheduleNextPresencePoll(cacheSeconds) {
+  if (urlParams.has('perf')) return; // In ?perf mode, do NOT poll
+  const delaySec = Math.max(typeof cacheSeconds === 'number' ? cacheSeconds : 20, 10);
+  if (presencePollTimer) clearTimeout(presencePollTimer);
+  presencePollTimer = setTimeout(async () => {
+    const freshData = await fetchLivePresence();
+    applyPresenceData(freshData);
+    scheduleNextPresencePoll(freshData.cache_seconds);
+  }, delaySec * 1000);
 }
 
 // Initialize Scene Data
@@ -590,7 +612,7 @@ function createNameplatesAtlas(bots) {
     const dotY = ry + rh / 2;
     ctx.beginPath();
     ctx.arc(dotX, dotY, 14, 0, Math.PI * 2);
-    ctx.fillStyle = bot.avatar_color || '#4285F4';
+    ctx.fillStyle = getColorFromKey(bot.key);
     ctx.fill();
     ctx.strokeStyle = '#FFFFFF';
     ctx.lineWidth = 2;
@@ -612,8 +634,11 @@ function createNameplatesAtlas(bots) {
 let botPinsData = [];
 let botPinMesh = null;
 let botBadgeMesh = null;
+let currentWorldData = null;
+let currentRoadElevationGrid = null;
+let currentNeighborhoods = null;
 
-function buildWorld(data, presenceData = DEFAULT_PRESENCE_FIXTURE) {
+function buildWorld(data, presenceData = PERF_PRESENCE_FIXTURE) {
   interactiveObjects.length = 0;
 
   const size = data.size || 128;
@@ -629,6 +654,10 @@ function buildWorld(data, presenceData = DEFAULT_PRESENCE_FIXTURE) {
   const roadGrid = Array.from({ length: size }, () => new Uint8Array(size));
   const roadElevationGrid = Array.from({ length: size }, () => new Float32Array(size).fill(NaN));
   const roadItems = [];
+
+  currentWorldData = data;
+  currentRoadElevationGrid = roadElevationGrid;
+  currentNeighborhoods = neighborhoods;
 
   built.forEach(item => {
     if (inBounds(item.x, item.y)) {
@@ -1147,105 +1176,9 @@ function buildWorld(data, presenceData = DEFAULT_PRESENCE_FIXTURE) {
   }
 
   // 5. Live Bot Presence Pins & Floating Badges (PLAN.md Section 19)
-  const bots = (presenceData && Array.isArray(presenceData.bots)) ? presenceData.bots : [];
-  botPinsData = [];
-
-  if (bots.length > 0) {
-    const pinGeo = createPinGeometry();
-    const pinMat = new THREE.MeshStandardMaterial({
-      roughness: 0.35,
-      metalness: 0.30
-    });
-
-    botPinMesh = new THREE.InstancedMesh(pinGeo, pinMat, bots.length);
-    botPinMesh.receiveShadow = true;
-    botPinMesh.castShadow = false;
-
-    const atlasTexture = createNameplatesAtlas(bots);
-    const badgeGeo = new THREE.PlaneGeometry(0.55, 0.14);
-    const uvYOffsets = new Float32Array(bots.length);
-    for (let i = 0; i < bots.length; i++) {
-      uvYOffsets[i] = (bots.length - 1 - i) / bots.length;
-    }
-    badgeGeo.setAttribute('aUvYOffset', new THREE.InstancedBufferAttribute(uvYOffsets, 1));
-
-    const badgeMat = new THREE.MeshBasicMaterial({
-      map: atlasTexture,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.FrontSide
-    });
-
-    badgeMat.onBeforeCompile = (shader) => {
-      shader.vertexShader = `
-        attribute float aUvYOffset;
-      ` + shader.vertexShader;
-      shader.vertexShader = shader.vertexShader.replace(
-        '#include <uv_vertex>',
-        `
-        #include <uv_vertex>
-        #ifdef USE_MAP
-          vMapUv = vec2(vMapUv.x, vMapUv.y / ${bots.length.toFixed(1)} + aUvYOffset);
-        #endif
-        `
-      );
-    };
-
-    botBadgeMesh = new THREE.InstancedMesh(badgeGeo, badgeMat, bots.length);
-    botBadgeMesh.receiveShadow = false;
-    botBadgeMesh.castShadow = false;
-
-    const dummy = new THREE.Object3D();
-    const instancesData = [];
-
-    bots.forEach((bot, i) => {
-      const [tx, ty] = bot.tile;
-      const groundY = resolveGroundElevation(tx, ty, data, roadElevationGrid);
-      const pinY = groundY + 0.015;
-      const posX = tx + 0.5;
-      const posZ = ty + 0.5;
-
-      dummy.position.set(posX, pinY, posZ);
-      dummy.rotation.set(0, 0, 0);
-      dummy.scale.set(1, 1, 1);
-      dummy.updateMatrix();
-      botPinMesh.setMatrixAt(i, dummy.matrix);
-      botPinMesh.setColorAt(i, new THREE.Color(bot.avatar_color || '#4285F4'));
-
-      dummy.position.set(posX, pinY + 0.72, posZ);
-      dummy.quaternion.copy(camera.quaternion);
-      dummy.updateMatrix();
-      botBadgeMesh.setMatrixAt(i, dummy.matrix);
-
-      const meta = {
-        x: tx,
-        y: ty,
-        tile: [tx, ty],
-        position: { x: posX, y: pinY, z: posZ },
-        name: bot.name,
-        status: bot.status || 'active',
-        avatar_color: bot.avatar_color || '#4285F4',
-        kind: 'bot',
-        isBot: true,
-        neighborhood: getNeighborhood(tx, ty, neighborhoods)
-      };
-      botPinsData.push(meta);
-      instancesData.push(meta);
-    });
-
-    botPinMesh.instanceMatrix.needsUpdate = true;
-    if (botPinMesh.instanceColor) botPinMesh.instanceColor.needsUpdate = true;
-    botPinMesh.computeBoundingSphere();
-    botPinMesh.userData.instancesData = instancesData;
-
-    botBadgeMesh.instanceMatrix.needsUpdate = true;
-    botBadgeMesh.computeBoundingSphere();
-    botBadgeMesh.userData.instancesData = instancesData;
-
-    scene.add(botPinMesh);
-    scene.add(botBadgeMesh);
-    interactiveObjects.push(botPinMesh);
-    interactiveObjects.push(botBadgeMesh);
+  applyPresenceData(presenceData);
+  if (!urlParams.has('perf')) {
+    scheduleNextPresencePoll(presenceData ? presenceData.cache_seconds : 20);
   }
 
   window.__sceneReady = true;
@@ -1271,9 +1204,10 @@ function buildWorld(data, presenceData = DEFAULT_PRESENCE_FIXTURE) {
       },
       getBotPins: () => botPinsData.map(p => ({
         name: p.name,
+        key: p.key,
         tile: [...p.tile],
         position: { ...p.position },
-        status: p.status,
+        color: p.color,
         avatar_color: p.avatar_color
       })),
       setCameraView: (cam, target) => {
@@ -1283,6 +1217,134 @@ function buildWorld(data, presenceData = DEFAULT_PRESENCE_FIXTURE) {
       }
     };
   }
+}
+
+function applyPresenceData(presenceData) {
+  isPresenceTruncated = Boolean(presenceData && presenceData.truncated);
+
+  // Clean up existing presence meshes if any
+  if (botPinMesh) {
+    scene.remove(botPinMesh);
+    const pIdx = interactiveObjects.indexOf(botPinMesh);
+    if (pIdx !== -1) interactiveObjects.splice(pIdx, 1);
+    botPinMesh.geometry.dispose();
+    botPinMesh.material.dispose();
+    botPinMesh = null;
+  }
+  if (botBadgeMesh) {
+    scene.remove(botBadgeMesh);
+    const bIdx = interactiveObjects.indexOf(botBadgeMesh);
+    if (bIdx !== -1) interactiveObjects.splice(bIdx, 1);
+    botBadgeMesh.geometry.dispose();
+    if (botBadgeMesh.material.map) botBadgeMesh.material.map.dispose();
+    botBadgeMesh.material.dispose();
+    botBadgeMesh = null;
+  }
+  botPinsData = [];
+
+  const rawBots = (presenceData && Array.isArray(presenceData.bots)) ? presenceData.bots : [];
+  // Strict privacy invariant: Bot presence must NEVER include human users (e.g. Pr0ject414)
+  const bots = rawBots.filter(b => b && b.name && b.name !== 'Pr0ject414' && Array.isArray(b.tile));
+
+  if (bots.length === 0 || !currentWorldData || !currentRoadElevationGrid) return;
+
+  const pinGeo = createPinGeometry();
+  const pinMat = new THREE.MeshStandardMaterial({
+    roughness: 0.35,
+    metalness: 0.30
+  });
+
+  botPinMesh = new THREE.InstancedMesh(pinGeo, pinMat, bots.length);
+  botPinMesh.receiveShadow = true;
+  botPinMesh.castShadow = false;
+
+  const atlasTexture = createNameplatesAtlas(bots);
+  const badgeGeo = new THREE.PlaneGeometry(0.55, 0.14);
+  const uvYOffsets = new Float32Array(bots.length);
+  for (let i = 0; i < bots.length; i++) {
+    uvYOffsets[i] = (bots.length - 1 - i) / bots.length;
+  }
+  badgeGeo.setAttribute('aUvYOffset', new THREE.InstancedBufferAttribute(uvYOffsets, 1));
+
+  const badgeMat = new THREE.MeshBasicMaterial({
+    map: atlasTexture,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.FrontSide
+  });
+
+  badgeMat.onBeforeCompile = (shader) => {
+    shader.vertexShader = `
+      attribute float aUvYOffset;
+    ` + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <uv_vertex>',
+      `
+      #include <uv_vertex>
+      #ifdef USE_MAP
+        vMapUv = vec2(vMapUv.x, vMapUv.y / ${bots.length.toFixed(1)} + aUvYOffset);
+      #endif
+      `
+    );
+  };
+
+  botBadgeMesh = new THREE.InstancedMesh(badgeGeo, badgeMat, bots.length);
+  botBadgeMesh.receiveShadow = false;
+  botBadgeMesh.castShadow = false;
+
+  const dummy = new THREE.Object3D();
+  const instancesData = [];
+
+  bots.forEach((bot, i) => {
+    const [tx, ty] = bot.tile;
+    const groundY = resolveGroundElevation(tx, ty, currentWorldData, currentRoadElevationGrid);
+    const pinY = groundY + 0.015;
+    const posX = tx + 0.5;
+    const posZ = ty + 0.5;
+    const colorHex = getColorFromKey(bot.key);
+
+    dummy.position.set(posX, pinY, posZ);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    botPinMesh.setMatrixAt(i, dummy.matrix);
+    botPinMesh.setColorAt(i, new THREE.Color(colorHex));
+
+    dummy.position.set(posX, pinY + 0.72, posZ);
+    dummy.quaternion.copy(camera.quaternion);
+    dummy.updateMatrix();
+    botBadgeMesh.setMatrixAt(i, dummy.matrix);
+
+    const meta = {
+      x: tx,
+      y: ty,
+      tile: [tx, ty],
+      position: { x: posX, y: pinY, z: posZ },
+      name: bot.name,
+      key: bot.key,
+      color: colorHex,
+      avatar_color: colorHex,
+      kind: 'bot',
+      isBot: true,
+      neighborhood: getNeighborhood(tx, ty, currentNeighborhoods || [])
+    };
+    botPinsData.push(meta);
+    instancesData.push(meta);
+  });
+
+  botPinMesh.instanceMatrix.needsUpdate = true;
+  if (botPinMesh.instanceColor) botPinMesh.instanceColor.needsUpdate = true;
+  botPinMesh.computeBoundingSphere();
+  botPinMesh.userData.instancesData = instancesData;
+
+  botBadgeMesh.instanceMatrix.needsUpdate = true;
+  botBadgeMesh.computeBoundingSphere();
+  botBadgeMesh.userData.instancesData = instancesData;
+
+  scene.add(botPinMesh);
+  scene.add(botBadgeMesh);
+  interactiveObjects.push(botPinMesh);
+  interactiveObjects.push(botBadgeMesh);
 }
 
 function getNeighborhood(x, y, neighborhoods) {
@@ -1412,9 +1474,14 @@ function showInspector(data) {
   if (data.isBot || data.kind === 'bot') {
     document.getElementById('inspect-coord').textContent = `(${data.x}, ${data.y})`;
     document.getElementById('inspect-hood').textContent = data.neighborhood || 'The Commons';
-    document.getElementById('inspect-structure').textContent = `BOT (${(data.status || 'ACTIVE').toUpperCase()})`;
+    document.getElementById('inspect-terrain').textContent = '--';
+    document.getElementById('inspect-structure').textContent = isPresenceTruncated ? 'BOT (ON PUBLIC TILE) [TRUNCATED]' : 'BOT (ON PUBLIC TILE)';
     document.getElementById('inspect-owner').textContent = data.name;
-    document.getElementById('inspect-desc').textContent = `Agent presence pin for ${data.name} on tile (${data.x}, ${data.y}). Status: ${data.status || 'active'}.`;
+    let desc = `Active bot presence pin for ${data.name} on public tile (${data.x}, ${data.y}).`;
+    if (isPresenceTruncated) {
+      desc += ' Note: Live bot list is truncated by server.';
+    }
+    document.getElementById('inspect-desc').textContent = desc;
     panel.classList.remove('hidden');
     return;
   }

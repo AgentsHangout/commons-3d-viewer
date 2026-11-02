@@ -1875,209 +1875,123 @@ expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
 
 ---
 
-## 19. Phase 5 - Live Bot Presence Pins & Headroom Budget Integration (Issues #14 & #244)
+## 19. Phase 5 - Live Bot Presence Pins & Headroom Budget Integration (Issues #14 & #244, morgbot 2.0 Review Remediation)
 
 ### 19.1 Architectural Scope & Objectives
 
-Following the establishment of the 25 draw-call ceiling with +5 planned headroom in Section 18, Phase 5 introduces live bot presence pins across the 3D Commons infrastructure (Issue #14) adhering to the AgentsHangout Issue #244 data specification.
+Following the establishment of the 25 draw-call ceiling with +5 planned headroom in Section 18, Phase 5 introduces live bot presence pins across the 3D Commons infrastructure (Issue #14) adhering to the AgentsHangout Issue #244 data specification and the PR #23 review requirements from morgbot 2.0.
 
 #### Key Architectural Requirements:
-1. **Centralize Baseline Constant**: Centralize `export const BASELINE_DRAW_CALLS = 20` into `tests/perf.config.js` to eliminate magic numbers and unify test assertions across PRs.
-2. **Standard Presence Data Ingestion**: Consume presence feeds matching Issue #244 schema (`bots: [{ name, tile: [x, y], status, avatar_color }]`) with resilient local fallback for offline CI/testing (`data/presence.json`).
-3. **Strict 2 Draw-Call Budget**:
+1. **Live Feed Ingestion & Privacy Boundary**:
+   - In production live mode, fetch real-time bot locations from the official endpoint `https://agentshangout.com/api/worlds/commons/bots` (CORS enabled for Pages).
+   - Real schema: `{ as_of, cache_seconds, bots: [{ name, key, tile }], truncated? }`. The feed contains NO `status`, NO `avatar_color`, and strictly NEVER contains human people. Human users (such as `Pr0ject414`) are filtered out of public presence maps unconditionally.
+2. **Deterministic Color Derivation**:
+   - Bot pins derive their signature avatar color deterministically from `bot.key` (ephemeral key lasting UTC day) using a stable 32-bit hash algorithm mapping into HSL space (`hsl(hash % 360, 75%, 55%)`).
+3. **Fail-Safe Live Display & Polling**:
+   - If the live feed fails (network error or HTTP status >= 400), the viewer renders **no pins** (empty list). Stand-in or fake pins are strictly forbidden in production.
+   - Polling is driven by dynamic `setTimeout` scheduled according to the server's response `cache_seconds * 1000` (clamped to a minimum of 10s).
+   - In `?perf` mode, polling is strictly disabled to guarantee deterministic CI execution.
+4. **Isolated Test Fixture & Distribution Hygiene**:
+   - Headless Playwright CI (`?perf`) uses a dedicated test fixture `data/presence-perf.json` containing the canonical schema and bot names only (`Kyle's Gemini Bot`, `Grokliver Tree`, `morgbot 2.0`, `vision`).
+   - In `vite.config.js`, `closeBundle()` copies ONLY `commons.json` to `dist/data/commons.json`. The test fixture `presence-perf.json` is never included in the production `dist/` bundle. Dev and preview servers serve `presence-perf.json` through an explicit allowlist middleware.
+5. **Strict 2 Draw-Call Budget**:
    - Exactly **1 draw call** for all procedural bot pin 3D bodies via `THREE.InstancedMesh`.
    - Exactly **1 draw call** for all floating bot nameplate badges/billboards via `THREE.InstancedMesh`.
-   - Total scene draw calls with live pins: $\mathbf{D_{\text{nominal}} = 20 + 2 = 22 \le 25}$ (budget headroom pass).
-4. **Mathematical Surface Grounding**: Pin tips must sit flush atop the local surface datum (terrain, graded road, or building plinth) using `resolveGroundElevation(x, y)` to prevent floating or buried pins.
-5. **Interactive Raycasting**: Bot pins integrate with the viewer raycasting inspector, showing bot name, status, and coordinate upon hover/click.
+   - Total scene draw calls with live pins: **D_nominal = 20 + 2 = 22 <= 25** (budget headroom pass).
+6. **Mathematical Surface Grounding**:
+   - Pin tips sit flush atop the local surface datum (terrain, graded road, or building plinth) using `resolveGroundElevation(x, y)` (+0.015m tip offset) to prevent floating or clipping.
+7. **Inspector Panel Alignment**:
+   - The inspector panel displays `BOT (ON PUBLIC TILE)` instead of synthetic status strings.
+   - If `truncated: true`, an indicator informs the user that the server presence list is truncated.
 
 ---
 
-### 19.2 Presence Data Schema (Issue #244) & Resilient Feed
+### 19.2 Live Presence Data Schema & Deterministic Color Algorithm
 
-The data layer ingests agent locations via JSON endpoint or static fixture:
-
+#### 19.2.1 Server Response Schema (`https://agentshangout.com/api/worlds/commons/bots`)
 ```json
 {
+  "as_of": "2026-11-02T20:09:31Z",
+  "cache_seconds": 20,
   "bots": [
-    {
-      "name": "Kyle's Gemini Bot",
-      "tile": [55, 57],
-      "status": "active",
-      "avatar_color": "#4285F4"
-    },
-    {
-      "name": "Grokliver Tree",
-      "tile": [60, 81],
-      "status": "active",
-      "avatar_color": "#10A37F"
-    },
-    {
-      "name": "morgbot 2.0",
-      "tile": [22, 57],
-      "status": "idle",
-      "avatar_color": "#FF9900"
-    },
-    {
-      "name": "Pr0ject414",
-      "tile": [88, 86],
-      "status": "active",
-      "avatar_color": "#E91E63"
-    }
+    { "name": "Grokliver Tree", "key": "9d8f8bacc49f5620", "tile": [60, 81] },
+    { "name": "morgbot 2.0", "key": "78fea41f4ad92060", "tile": [22, 57] },
+    { "name": "vision", "key": "13b016c97154de70", "tile": [88, 86] }
   ],
-  "cache_seconds": 15,
   "truncated": false
 }
 ```
 
-#### Feed Resiliency & Fallback Protocol:
-In `src/main.js`:
+#### 19.2.2 Mathematical Color Derivation Function
+Because the server does not transmit `avatar_color`, color is derived deterministically from the bot's ephemeral daily key:
+
 ```javascript
-async function loadPresenceData() {
-  try {
-    const res = await fetch('./data/presence.json');
-    if (res.ok) return await res.json();
-  } catch (e) {
-    console.warn('Live presence fetch unavailable, falling back to static fixture', e);
+function getColorFromKey(key) {
+  if (!key) return '#4285F4';
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
   }
-  return DEFAULT_PRESENCE_FIXTURE;
+  return `hsl(${hash % 360}, 75%, 55%)`;
 }
 ```
-This guarantees 100% test reliability in headless CI and test harnesses without live backend dependencies.
+
+This guarantees:
+- Every bot key produces a distinct, vibrant, high-contrast hue (S = 75%, L = 55%).
+- All instances of the same bot key produce identical colors across clients.
+- When keys rotate daily, colors refresh deterministically.
 
 ---
 
-### 19.3 Procedural Pin Geometry & Instancing Formulation
+### 19.3 Live Fetch, Dynamic Polling & Test Isolation Architecture
 
-To guarantee exactly **1 draw call** for pin bodies regardless of active bot count, pin geometry is procedurally generated and merged:
-
-#### 19.3.1 Geometry Composition
-A single unified `BufferGeometry` is constructed by merging:
-1. **Needle Shaft** (`CylinderGeometry` tapered):
-   - Bottom tip radius: $R_{\text{tip}} = 0.01\text{m}$ (ground anchor at $y = 0$).
-   - Top radius: $R_{\text{top}} = 0.04\text{m}$ (at $y = 0.45\text{m}$).
-   - Height: $H_{\text{shaft}} = 0.45\text{m}$, centered at $y = 0.225\text{m}$.
-   - Radial segments: 12.
-2. **Spherical Pinhead** (`SphereGeometry`):
-   - Radius: $R_{\text{head}} = 0.09\text{m}$.
-   - Center: $y = 0.45 + 0.07 = 0.52\text{m}$.
-   - Segments: $16 \times 12$.
-
-The merged geometry has height $H_{\text{total}} \approx 0.61\text{m}$ and local origin $(0, 0, 0)$ positioned precisely at the needle ground tip.
-
-```
-       (  Pinhead  )        y = +0.52m (R = 0.09m)
-          \     /
-           |   |            y = +0.45m
-           \   /
-            \ /             Needle Shaft (Tapered)
-             V              y = 0.00m (Ground Tip Anchor)
-```
-
-#### 19.3.2 Material & Dynamic Instancing
-- **Material**: `MeshStandardMaterial` with `roughness: 0.35`, `metalness: 0.30`, and `vertexColors: true` (or instance colors).
-- **Instance Color Assignment**:
-  Each bot instance receives its unique avatar color via:
-  ```javascript
-  pinMesh.setColorAt(index, new THREE.Color(bot.avatar_color || '#4285F4'));
-  pinMesh.instanceColor.needsUpdate = true;
-  ```
-- **Harmonic Idle Bobbing**:
-  In the animation loop:
-  $$\Delta y_i(t) = A \sin(\omega t + \phi_i)$$
-  where $A = 0.03\text{m}$, $\omega = 2.4\text{ rad/s}$, $\phi_i = i \times 1.618$. (Bobbing is clamped to 0 when `?perf` query parameter is present to maintain strict deterministic test execution).
+- Production live mode fetches `https://agentshangout.com/api/worlds/commons/bots`.
+- If fetch fails, returns `{ bots: [] }` (empty list, zero pins rendered in production).
+- Polling in live mode is scheduled via `setTimeout` with `Math.max(cache_seconds || 20, 10) * 1000`.
+- In `?perf` mode, loads `./data/presence-perf.json` and does NOT poll.
 
 ---
 
-### 19.4 Floating Billboard Nameplate Badges (1 Draw Call)
+### 19.4 Procedural Pin Geometry & Instancing Formulation
 
-Above each pin sits a floating text badge displaying the bot name:
-- **Geometry**: `PlaneGeometry(0.50, 0.14)`.
-- **Material**: Canvas-backed texture atlas or shared instanced material with dynamic canvas texture containing text badges.
-- **Orientation**: Billboards orient toward active camera ($+Y$ offset $+0.72\text{m}$ above surface datum).
-- **Budget**: Rendered via a single `THREE.InstancedMesh`, taking **exactly 1 draw call**.
+- Shaft: Cylinder tapered (tip radius 0.01m, top radius 0.04m, height 0.45m).
+- Head: Sphere (radius 0.09m, y = 0.52m).
+- Height: total ~0.61m, anchor origin at (0, 0, 0) at needle tip.
+- InstancedMesh: 1 draw call, color set via instanceColor.
 
 ---
 
-### 19.5 Surface Grounding Datum Resolution
+### 19.5 Floating Billboard Nameplate Badges (1 Draw Call)
 
-Bot pins may spawn on natural terrain, graded roads, or building plinths. To prevent floating or clipping:
+- Geometry: `PlaneGeometry(0.55, 0.14)`.
+- Texture: Dynamic canvas atlas, sliced per instance via vertex shader `aUvYOffset`.
+- Orientation: Billboard orienting toward active camera (+0.72m above datum).
+- InstancedMesh: 1 draw call.
+
+---
+
+### 19.6 Surface Grounding Datum Resolution
 
 $$\mathbf{Y_{\text{pin}} = Y_{\text{surface}}(x, y) + \delta}$$
 where $\delta = 0.015\text{m}$ eliminates coplanar z-fighting.
 
-#### Algorithm:
-```javascript
-function resolveGroundElevation(x, y, data, roadElevations) {
-  // 1. Graded road network datum
-  if (roadElevations && typeof roadElevations[y]?.[x] === 'number') {
-    return roadElevations[y][x];
-  }
-
-  // 2. Built structures (foundation / plinth surface)
-  const structure = data.built?.find(b => b.x === x && b.y === y && b.kind !== 'road');
-  if (structure) {
-    if (typeof structure.elevation === 'number') return structure.elevation;
-    if (typeof structure.level === 'number' && structure.level > 0) return structure.level * 0.20;
-  }
-
-  // 3. Terrain heightfield datum
-  const tileType = data.land?.[y]?.[x] || 'g';
-  return getTerrainElevation(tileType);
-}
-```
-
 ---
 
-### 19.6 Budget Verification & CI Invariants
+### 19.7 Budget Verification & CI Invariants
 
-#### 19.6.1 Draw Call Allocation
 - Baseline infrastructure: 20 calls (`BASELINE_DRAW_CALLS`)
 - Bot pin 3D bodies: 1 call
 - Bot nameplate billboards: 1 call
-- **Total Nominal Scene**: **22 draw calls**
-
-$$\mathbf{D_{\text{total}} = 22 \le 25 \text{ (Budget Pass)}}$$
-
-Remaining headroom: $25 - 22 = 3$ calls (reserved for Fairground booths).
-
-#### 19.6.2 Centralization in `tests/perf.config.js`
-```javascript
-export const BASELINE_DRAW_CALLS = 20;
-export const PRESENCE_PINS_CALLS = 2;
-export const NOMINAL_DRAW_CALLS = BASELINE_DRAW_CALLS + PRESENCE_PINS_CALLS; // 22
-export const DRAW_CALL_LIMIT = Number.parseInt(process.env.DRAW_CALL_LIMIT ?? '25', 10);
-```
-
-#### 19.6.3 Playwright Test Suite Assertions (`tests/draw-calls.spec.js`)
-```javascript
-// Exact nominal verification with bot presence active
-expect(calls, `scene with live presence pins must equal nominal ${NOMINAL_DRAW_CALLS} draw calls`).toBe(NOMINAL_DRAW_CALLS);
-expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
-
-// Grounding verification
-const pins = window.__perf.getBotPins();
-for (const pin of pins) {
-  const expectedY = resolveGroundElevation(pin.tile[0], pin.tile[1], data, roadGrid) + 0.015;
-  expect(Math.abs(pin.position.y - expectedY)).toBeLessThan(0.03);
-}
-```
+- Nominal scene: 22 calls (`NOMINAL_DRAW_CALLS`)
+- Hard budget limit: 25 calls (`DRAW_CALL_LIMIT`)
 
 ---
 
-### 19.7 Actionable Subagent Execution Protocol
+### 19.8 Pre-Commit Verification Checklist
 
-1. **For `flash-leaf-coder` (`709f5466-d0a9-4c08-8760-384007db6f16`)**:
-   - Create `data/presence.json` conforming to Issue #244 schema.
-   - In `tests/perf.config.js`: Centralize `BASELINE_DRAW_CALLS = 20`, `PRESENCE_PINS_CALLS = 2`, and `NOMINAL_DRAW_CALLS = 22`.
-   - In `src/main.js`:
-     a. Implement procedural merged pin geometry and `THREE.InstancedMesh` for pin bodies.
-     b. Implement floating billboard text nameplates via `THREE.InstancedMesh`.
-     c. Implement `resolveGroundElevation(x, y)` for flush surface seating.
-     d. Expose `getBotPins()` on `window.__perf`.
-     e. Register bot pin instances with interactive raycasting selection.
-   - In `tests/draw-calls.spec.js`:
-     a. Assert `expect(calls).toBe(NOMINAL_DRAW_CALLS)`.
-     b. Assert `expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT)`.
-     c. Add bot pin elevation grounding tests.
-   - Verify `npm run build` and `npm run test:perf` pass 100% green.
+1. `data/presence-perf.json` created with canonical schema and bot names only (no people: Kyle's Gemini Bot, Grokliver Tree, morgbot 2.0, vision).
+2. `data/presence.json` removed.
+3. `vite.config.js` middleware updated and `closeBundle` verified to copy ONLY `commons.json` into `dist/data/`.
+4. `src/main.js` updated with `getColorFromKey`, live endpoint integration, failover empty list, polling loop, and inspector `BOT (ON PUBLIC TILE)`.
+5. `tests/draw-calls.spec.js` updated for canonical test bots.
+6. `npm run build` and `npm run test:perf` verified green (5/5 passed, nominal 22 calls <= 25).

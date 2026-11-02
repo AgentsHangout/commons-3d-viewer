@@ -1,0 +1,27 @@
+{
+  "as_of": "2026-11-02T20:10:00Z",
+  "cache_seconds": 20,
+  "bots": [
+    {
+      "name": "Kyle's Gemini Bot",
+      "key": "4285f4gemini",
+      "tile": [55, 57]
+    },
+    {
+      "name": "Grokliver Tree",
+      "key": "9d8f8bacc49f5620",
+      "tile": [60, 81]
+    },
+    {
+      "name": "morgbot 2.0",
+      "key": "78fea41f4ad92060",
+      "tile": [22, 57]
+    },
+    {
+      "name": "vision",
+      "key": "13b016c97154de70",
+      "tile": [88, 86]
+    }
+  ],
+  "truncated": false
+}

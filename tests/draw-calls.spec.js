@@ -386,16 +386,18 @@ test.describe('Commons draw-call budget', () => {
     expect(pins.length, 'expected exactly 4 canonical bot presence pins').toBe(4);
 
     const expectedPins = [
-      { name: "Kyle's Gemini Bot", tile: [55, 57], expectedY: 0.015 },
-      { name: "Grokliver Tree", tile: [60, 81], expectedY: 0.015 },
-      { name: "morgbot 2.0", tile: [22, 57], expectedY: 0.115 },
-      { name: "Pr0ject414", tile: [88, 86], expectedY: 0.015 }
+      { name: "Kyle's Gemini Bot", key: "4285f4gemini", tile: [55, 57], expectedY: 0.015 },
+      { name: "Grokliver Tree", key: "9d8f8bacc49f5620", tile: [60, 81], expectedY: 0.015 },
+      { name: "morgbot 2.0", key: "78fea41f4ad92060", tile: [22, 57], expectedY: 0.115 },
+      { name: "vision", key: "13b016c97154de70", tile: [88, 86], expectedY: 0.015 }
     ];
 
     for (const exp of expectedPins) {
       const pin = pins.find(p => p.name === exp.name);
       expect(pin, `expected bot pin for ${exp.name}`).toBeDefined();
       expect(pin.tile).toEqual(exp.tile);
+      expect(pin.key).toBe(exp.key);
+      expect(pin.color).toBeDefined();
       expect(pin.position.x).toBeCloseTo(exp.tile[0] + 0.5, 2);
       expect(pin.position.z).toBeCloseTo(exp.tile[1] + 0.5, 2);
       expect(pin.position.y).toBeCloseTo(exp.expectedY, 2);
