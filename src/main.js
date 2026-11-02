@@ -177,6 +177,26 @@ function buildWorld(data) {
       return;
     }
 
+    if (kind === 'cleared') {
+      const clearGeo = new THREE.BoxGeometry(0.98, 0.02, 0.98);
+      const clearMat = new THREE.MeshStandardMaterial({ color: 0x5a4832, roughness: 0.95 });
+      const clearMesh = new THREE.Mesh(clearGeo, clearMat);
+      clearMesh.position.set(x + 0.5, 0.01, y + 0.5);
+      clearMesh.receiveShadow = true;
+      scene.add(clearMesh);
+      return;
+    }
+
+    if (kind === 'green') {
+      const greenGeo = new THREE.BoxGeometry(0.98, 0.04, 0.98);
+      const greenMat = new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.85 });
+      const greenMesh = new THREE.Mesh(greenGeo, greenMat);
+      greenMesh.position.set(x + 0.5, 0.02, y + 0.5);
+      greenMesh.receiveShadow = true;
+      scene.add(greenMesh);
+      return;
+    }
+
     // Custom models for specific buildings
     let instance = null;
 
@@ -240,7 +260,7 @@ function buildWorld(data) {
 function getNeighborhood(x, y, neighborhoods) {
   const wx = Math.floor(x / 32) * 32;
   const wy = Math.floor(y / 32) * 32;
-  const found = neighborhoods.find(n => n.bounds && n.bounds[0] === wx && n.bounds[1] === wy);
+  const found = neighborhoods.find(n => (n.x0 === wx && n.y0 === wy) || (n.bounds && n.bounds[0] === wx && n.bounds[1] === wy));
   return found ? `${found.name} (${found.character})` : 'The Commons';
 }
 
