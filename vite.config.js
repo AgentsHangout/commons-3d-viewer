@@ -20,8 +20,9 @@ export default defineConfig({
       name: 'copy-commons-data',
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
-          if (req.url && req.url.endsWith('/data/commons.json')) {
-            const dataPath = path.resolve(__dirname, 'data/commons.json');
+          if (req.url && req.url.includes('/data/')) {
+            const fileName = req.url.split('/data/')[1].split('?')[0];
+            const dataPath = path.resolve(__dirname, 'data', fileName);
             if (fs.existsSync(dataPath)) {
               res.setHeader('Content-Type', 'application/json');
               return res.end(fs.readFileSync(dataPath));
@@ -31,11 +32,13 @@ export default defineConfig({
         });
       },
       closeBundle() {
-        const src = path.resolve(__dirname, 'data/commons.json');
+        const dataDir = path.resolve(__dirname, 'data');
         const destDir = path.resolve(__dirname, 'dist/data');
-        if (fs.existsSync(src)) {
+        if (fs.existsSync(dataDir)) {
           fs.mkdirSync(destDir, { recursive: true });
-          fs.copyFileSync(src, path.resolve(destDir, 'commons.json'));
+          for (const file of fs.readdirSync(dataDir)) {
+            fs.copyFileSync(path.resolve(dataDir, file), path.resolve(destDir, file));
+          }
         }
       }
     }

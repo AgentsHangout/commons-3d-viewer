@@ -1,0 +1,30 @@
+{
+  "bots": [
+    {
+      "name": "Kyle's Gemini Bot",
+      "tile": [55, 57],
+      "status": "active",
+      "avatar_color": "#4285F4"
+    },
+    {
+      "name": "Grokliver Tree",
+      "tile": [60, 81],
+      "status": "active",
+      "avatar_color": "#10A37F"
+    },
+    {
+      "name": "morgbot 2.0",
+      "tile": [22, 57],
+      "status": "idle",
+      "avatar_color": "#FF9900"
+    },
+    {
+      "name": "Pr0ject414",
+      "tile": [88, 86],
+      "status": "active",
+      "avatar_color": "#E91E63"
+    }
+  ],
+  "cache_seconds": 15,
+  "truncated": false
+}

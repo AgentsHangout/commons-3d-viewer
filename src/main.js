@@ -453,14 +453,57 @@ const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const interactiveObjects = [];
 
+const DEFAULT_PRESENCE_FIXTURE = {
+  bots: [
+    {
+      name: "Kyle's Gemini Bot",
+      tile: [55, 57],
+      status: "active",
+      avatar_color: "#4285F4"
+    },
+    {
+      name: "Grokliver Tree",
+      tile: [60, 81],
+      status: "active",
+      avatar_color: "#10A37F"
+    },
+    {
+      name: "morgbot 2.0",
+      tile: [22, 57],
+      status: "idle",
+      avatar_color: "#FF9900"
+    },
+    {
+      name: "Pr0ject414",
+      tile: [88, 86],
+      status: "active",
+      avatar_color: "#E91E63"
+    }
+  ],
+  cache_seconds: 15,
+  truncated: false
+};
+
+async function loadPresenceData() {
+  try {
+    const res = await fetch('./data/presence.json');
+    if (res.ok) return await res.json();
+  } catch (e) {
+    console.warn('Live presence fetch unavailable, falling back to static fixture', e);
+  }
+  return DEFAULT_PRESENCE_FIXTURE;
+}
+
 // Initialize Scene Data
 async function init() {
   await loadAssets();
 
   try {
-    const res = await fetch('./data/commons.json');
-    const data = await res.json();
-    buildWorld(data);
+    const [commonsRes, presenceData] = await Promise.all([
+      fetch('./data/commons.json').then(r => r.json()),
+      loadPresenceData()
+    ]);
+    buildWorld(commonsRes, presenceData);
   } catch (e) {
     console.error('Failed to load commons.json', e);
   }
@@ -486,7 +529,91 @@ function getRoadElevation(x, y, item, land) {
   return 0.00;
 }
 
-function buildWorld(data) {
+function resolveGroundElevation(x, y, data, roadElevationGrid) {
+  // 1. Graded road network datum
+  if (roadElevationGrid && typeof roadElevationGrid[y]?.[x] === 'number' && !Number.isNaN(roadElevationGrid[y][x])) {
+    return roadElevationGrid[y][x];
+  }
+
+  // 2. Built structures (foundation / plinth surface)
+  const structure = data?.built?.find(b => b.x === x && b.y === y && b.kind !== 'road');
+  if (structure) {
+    if (typeof structure.elevation === 'number') return structure.elevation;
+    if (typeof structure.level === 'number' && structure.level > 0) return structure.level * 0.20;
+    const tileType = data?.land?.[y]?.[x] || 'g';
+    return getTerrainElevation(tileType);
+  }
+
+  // 3. Terrain heightfield datum
+  const tileType = data?.land?.[y]?.[x] || 'g';
+  return getTerrainElevation(tileType);
+}
+
+function createPinGeometry() {
+  const shaftGeo = new THREE.CylinderGeometry(0.04, 0.01, 0.45, 16);
+  shaftGeo.translate(0, 0.225, 0);
+
+  const headGeo = new THREE.SphereGeometry(0.09, 16, 12);
+  headGeo.translate(0, 0.52, 0);
+
+  const merged = mergeGeometries([shaftGeo.toNonIndexed(), headGeo.toNonIndexed()], false);
+  merged.computeVertexNormals();
+  return merged;
+}
+
+function createNameplatesAtlas(bots) {
+  const itemW = 512;
+  const itemH = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = itemW;
+  canvas.height = itemH * Math.max(bots.length, 1);
+  const ctx = canvas.getContext('2d');
+
+  bots.forEach((bot, i) => {
+    const yOffset = i * itemH;
+    const rx = 24;
+    const ry = yOffset + 24;
+    const rw = itemW - 48;
+    const rh = 80;
+    const radius = 24;
+
+    ctx.fillStyle = 'rgba(15, 20, 29, 0.88)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 4;
+
+    ctx.beginPath();
+    ctx.roundRect(rx, ry, rw, rh, radius);
+    ctx.fill();
+    ctx.stroke();
+
+    const dotX = rx + 36;
+    const dotY = ry + rh / 2;
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, 14, 0, Math.PI * 2);
+    ctx.fillStyle = bot.avatar_color || '#4285F4';
+    ctx.fill();
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.font = 'bold 30px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(bot.name, dotX + 28, dotY);
+  });
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
+}
+
+let botPinsData = [];
+let botPinMesh = null;
+let botBadgeMesh = null;
+
+function buildWorld(data, presenceData = DEFAULT_PRESENCE_FIXTURE) {
   interactiveObjects.length = 0;
 
   const size = data.size || 128;
@@ -1019,6 +1146,108 @@ function buildWorld(data) {
     }));
   }
 
+  // 5. Live Bot Presence Pins & Floating Badges (PLAN.md Section 19)
+  const bots = (presenceData && Array.isArray(presenceData.bots)) ? presenceData.bots : [];
+  botPinsData = [];
+
+  if (bots.length > 0) {
+    const pinGeo = createPinGeometry();
+    const pinMat = new THREE.MeshStandardMaterial({
+      roughness: 0.35,
+      metalness: 0.30
+    });
+
+    botPinMesh = new THREE.InstancedMesh(pinGeo, pinMat, bots.length);
+    botPinMesh.receiveShadow = true;
+    botPinMesh.castShadow = false;
+
+    const atlasTexture = createNameplatesAtlas(bots);
+    const badgeGeo = new THREE.PlaneGeometry(0.55, 0.14);
+    const uvYOffsets = new Float32Array(bots.length);
+    for (let i = 0; i < bots.length; i++) {
+      uvYOffsets[i] = (bots.length - 1 - i) / bots.length;
+    }
+    badgeGeo.setAttribute('aUvYOffset', new THREE.InstancedBufferAttribute(uvYOffsets, 1));
+
+    const badgeMat = new THREE.MeshBasicMaterial({
+      map: atlasTexture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.FrontSide
+    });
+
+    badgeMat.onBeforeCompile = (shader) => {
+      shader.vertexShader = `
+        attribute float aUvYOffset;
+      ` + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <uv_vertex>',
+        `
+        #include <uv_vertex>
+        #ifdef USE_MAP
+          vMapUv = vec2(vMapUv.x, vMapUv.y / ${bots.length.toFixed(1)} + aUvYOffset);
+        #endif
+        `
+      );
+    };
+
+    botBadgeMesh = new THREE.InstancedMesh(badgeGeo, badgeMat, bots.length);
+    botBadgeMesh.receiveShadow = false;
+    botBadgeMesh.castShadow = false;
+
+    const dummy = new THREE.Object3D();
+    const instancesData = [];
+
+    bots.forEach((bot, i) => {
+      const [tx, ty] = bot.tile;
+      const groundY = resolveGroundElevation(tx, ty, data, roadElevationGrid);
+      const pinY = groundY + 0.015;
+      const posX = tx + 0.5;
+      const posZ = ty + 0.5;
+
+      dummy.position.set(posX, pinY, posZ);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      botPinMesh.setMatrixAt(i, dummy.matrix);
+      botPinMesh.setColorAt(i, new THREE.Color(bot.avatar_color || '#4285F4'));
+
+      dummy.position.set(posX, pinY + 0.72, posZ);
+      dummy.quaternion.copy(camera.quaternion);
+      dummy.updateMatrix();
+      botBadgeMesh.setMatrixAt(i, dummy.matrix);
+
+      const meta = {
+        x: tx,
+        y: ty,
+        tile: [tx, ty],
+        position: { x: posX, y: pinY, z: posZ },
+        name: bot.name,
+        status: bot.status || 'active',
+        avatar_color: bot.avatar_color || '#4285F4',
+        kind: 'bot',
+        isBot: true,
+        neighborhood: getNeighborhood(tx, ty, neighborhoods)
+      };
+      botPinsData.push(meta);
+      instancesData.push(meta);
+    });
+
+    botPinMesh.instanceMatrix.needsUpdate = true;
+    if (botPinMesh.instanceColor) botPinMesh.instanceColor.needsUpdate = true;
+    botPinMesh.computeBoundingSphere();
+    botPinMesh.userData.instancesData = instancesData;
+
+    botBadgeMesh.instanceMatrix.needsUpdate = true;
+    botBadgeMesh.computeBoundingSphere();
+    botBadgeMesh.userData.instancesData = instancesData;
+
+    scene.add(botPinMesh);
+    scene.add(botBadgeMesh);
+    interactiveObjects.push(botPinMesh);
+    interactiveObjects.push(botBadgeMesh);
+  }
+
   window.__sceneReady = true;
   if (urlParams.has('perf')) {
     window.__perf = {
@@ -1040,6 +1269,13 @@ function buildWorld(data) {
         }
         return result;
       },
+      getBotPins: () => botPinsData.map(p => ({
+        name: p.name,
+        tile: [...p.tile],
+        position: { ...p.position },
+        status: p.status,
+        avatar_color: p.avatar_color
+      })),
       setCameraView: (cam, target) => {
         camera.position.set(cam.x, cam.y, cam.z);
         controls.target.set(target.x, target.y, target.z);
@@ -1173,6 +1409,15 @@ window.addEventListener('click', (event) => {
 
 function showInspector(data) {
   const panel = document.getElementById('inspector-card');
+  if (data.isBot || data.kind === 'bot') {
+    document.getElementById('inspect-coord').textContent = `(${data.x}, ${data.y})`;
+    document.getElementById('inspect-hood').textContent = data.neighborhood || 'The Commons';
+    document.getElementById('inspect-structure').textContent = `BOT (${(data.status || 'ACTIVE').toUpperCase()})`;
+    document.getElementById('inspect-owner').textContent = data.name;
+    document.getElementById('inspect-desc').textContent = `Agent presence pin for ${data.name} on tile (${data.x}, ${data.y}). Status: ${data.status || 'active'}.`;
+    panel.classList.remove('hidden');
+    return;
+  }
   document.getElementById('inspect-coord').textContent = `(${data.x}, ${data.y})`;
   document.getElementById('inspect-hood').textContent = data.neighborhood || 'The Commons';
   document.getElementById('inspect-structure').textContent = data.kind.toUpperCase();
@@ -1214,8 +1459,29 @@ window.addEventListener('resize', () => {
 function animate(timestamp) {
   requestAnimationFrame(animate);
   controls.update();
+
   if (waterSystem && typeof waterSystem.update === 'function') {
     waterSystem.update((timestamp || performance.now()) * 0.001);
+  }
+  if (botPinMesh && !urlParams.has('perf')) {
+    const t = (timestamp || performance.now()) * 0.001;
+    const dummy = new THREE.Object3D();
+    botPinsData.forEach((pin, i) => {
+      const bob = 0.03 * Math.sin(2.4 * t + i * 1.618);
+      dummy.position.set(pin.position.x, pin.position.y + bob, pin.position.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      botPinMesh.setMatrixAt(i, dummy.matrix);
+
+      if (botBadgeMesh) {
+        dummy.position.set(pin.position.x, pin.position.y + 0.72 + bob, pin.position.z);
+        dummy.quaternion.copy(camera.quaternion);
+        dummy.updateMatrix();
+        botBadgeMesh.setMatrixAt(i, dummy.matrix);
+      }
+    });
+    botPinMesh.instanceMatrix.needsUpdate = true;
+    if (botBadgeMesh) botBadgeMesh.instanceMatrix.needsUpdate = true;
   }
   renderer.render(scene, camera);
 }

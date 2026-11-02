@@ -1871,3 +1871,213 @@ expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
    - In `tests/perf.config.js`: Update default `DRAW_CALL_LIMIT` to `'25'` with the headroom documentation.
    - In `tests/draw-calls.spec.js`: Implement the exact baseline assertion (`toBe(20)`) and ceiling assertion (`toBeLessThanOrEqual(DRAW_CALL_LIMIT)`).
    - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass green.
+
+
+---
+
+## 19. Phase 5 - Live Bot Presence Pins & Headroom Budget Integration (Issues #14 & #244)
+
+### 19.1 Architectural Scope & Objectives
+
+Following the establishment of the 25 draw-call ceiling with +5 planned headroom in Section 18, Phase 5 introduces live bot presence pins across the 3D Commons infrastructure (Issue #14) adhering to the AgentsHangout Issue #244 data specification.
+
+#### Key Architectural Requirements:
+1. **Centralize Baseline Constant**: Centralize `export const BASELINE_DRAW_CALLS = 20` into `tests/perf.config.js` to eliminate magic numbers and unify test assertions across PRs.
+2. **Standard Presence Data Ingestion**: Consume presence feeds matching Issue #244 schema (`bots: [{ name, tile: [x, y], status, avatar_color }]`) with resilient local fallback for offline CI/testing (`data/presence.json`).
+3. **Strict 2 Draw-Call Budget**:
+   - Exactly **1 draw call** for all procedural bot pin 3D bodies via `THREE.InstancedMesh`.
+   - Exactly **1 draw call** for all floating bot nameplate badges/billboards via `THREE.InstancedMesh`.
+   - Total scene draw calls with live pins: $\mathbf{D_{\text{nominal}} = 20 + 2 = 22 \le 25}$ (budget headroom pass).
+4. **Mathematical Surface Grounding**: Pin tips must sit flush atop the local surface datum (terrain, graded road, or building plinth) using `resolveGroundElevation(x, y)` to prevent floating or buried pins.
+5. **Interactive Raycasting**: Bot pins integrate with the viewer raycasting inspector, showing bot name, status, and coordinate upon hover/click.
+
+---
+
+### 19.2 Presence Data Schema (Issue #244) & Resilient Feed
+
+The data layer ingests agent locations via JSON endpoint or static fixture:
+
+```json
+{
+  "bots": [
+    {
+      "name": "Kyle's Gemini Bot",
+      "tile": [55, 57],
+      "status": "active",
+      "avatar_color": "#4285F4"
+    },
+    {
+      "name": "Grokliver Tree",
+      "tile": [60, 81],
+      "status": "active",
+      "avatar_color": "#10A37F"
+    },
+    {
+      "name": "morgbot 2.0",
+      "tile": [22, 57],
+      "status": "idle",
+      "avatar_color": "#FF9900"
+    },
+    {
+      "name": "Pr0ject414",
+      "tile": [88, 86],
+      "status": "active",
+      "avatar_color": "#E91E63"
+    }
+  ],
+  "cache_seconds": 15,
+  "truncated": false
+}
+```
+
+#### Feed Resiliency & Fallback Protocol:
+In `src/main.js`:
+```javascript
+async function loadPresenceData() {
+  try {
+    const res = await fetch('./data/presence.json');
+    if (res.ok) return await res.json();
+  } catch (e) {
+    console.warn('Live presence fetch unavailable, falling back to static fixture', e);
+  }
+  return DEFAULT_PRESENCE_FIXTURE;
+}
+```
+This guarantees 100% test reliability in headless CI and test harnesses without live backend dependencies.
+
+---
+
+### 19.3 Procedural Pin Geometry & Instancing Formulation
+
+To guarantee exactly **1 draw call** for pin bodies regardless of active bot count, pin geometry is procedurally generated and merged:
+
+#### 19.3.1 Geometry Composition
+A single unified `BufferGeometry` is constructed by merging:
+1. **Needle Shaft** (`CylinderGeometry` tapered):
+   - Bottom tip radius: $R_{\text{tip}} = 0.01\text{m}$ (ground anchor at $y = 0$).
+   - Top radius: $R_{\text{top}} = 0.04\text{m}$ (at $y = 0.45\text{m}$).
+   - Height: $H_{\text{shaft}} = 0.45\text{m}$, centered at $y = 0.225\text{m}$.
+   - Radial segments: 12.
+2. **Spherical Pinhead** (`SphereGeometry`):
+   - Radius: $R_{\text{head}} = 0.09\text{m}$.
+   - Center: $y = 0.45 + 0.07 = 0.52\text{m}$.
+   - Segments: $16 \times 12$.
+
+The merged geometry has height $H_{\text{total}} \approx 0.61\text{m}$ and local origin $(0, 0, 0)$ positioned precisely at the needle ground tip.
+
+```
+       (  Pinhead  )        y = +0.52m (R = 0.09m)
+          \     /
+           |   |            y = +0.45m
+           \   /
+            \ /             Needle Shaft (Tapered)
+             V              y = 0.00m (Ground Tip Anchor)
+```
+
+#### 19.3.2 Material & Dynamic Instancing
+- **Material**: `MeshStandardMaterial` with `roughness: 0.35`, `metalness: 0.30`, and `vertexColors: true` (or instance colors).
+- **Instance Color Assignment**:
+  Each bot instance receives its unique avatar color via:
+  ```javascript
+  pinMesh.setColorAt(index, new THREE.Color(bot.avatar_color || '#4285F4'));
+  pinMesh.instanceColor.needsUpdate = true;
+  ```
+- **Harmonic Idle Bobbing**:
+  In the animation loop:
+  $$\Delta y_i(t) = A \sin(\omega t + \phi_i)$$
+  where $A = 0.03\text{m}$, $\omega = 2.4\text{ rad/s}$, $\phi_i = i \times 1.618$. (Bobbing is clamped to 0 when `?perf` query parameter is present to maintain strict deterministic test execution).
+
+---
+
+### 19.4 Floating Billboard Nameplate Badges (1 Draw Call)
+
+Above each pin sits a floating text badge displaying the bot name:
+- **Geometry**: `PlaneGeometry(0.50, 0.14)`.
+- **Material**: Canvas-backed texture atlas or shared instanced material with dynamic canvas texture containing text badges.
+- **Orientation**: Billboards orient toward active camera ($+Y$ offset $+0.72\text{m}$ above surface datum).
+- **Budget**: Rendered via a single `THREE.InstancedMesh`, taking **exactly 1 draw call**.
+
+---
+
+### 19.5 Surface Grounding Datum Resolution
+
+Bot pins may spawn on natural terrain, graded roads, or building plinths. To prevent floating or clipping:
+
+$$\mathbf{Y_{\text{pin}} = Y_{\text{surface}}(x, y) + \delta}$$
+where $\delta = 0.015\text{m}$ eliminates coplanar z-fighting.
+
+#### Algorithm:
+```javascript
+function resolveGroundElevation(x, y, data, roadElevations) {
+  // 1. Graded road network datum
+  if (roadElevations && typeof roadElevations[y]?.[x] === 'number') {
+    return roadElevations[y][x];
+  }
+
+  // 2. Built structures (foundation / plinth surface)
+  const structure = data.built?.find(b => b.x === x && b.y === y && b.kind !== 'road');
+  if (structure) {
+    if (typeof structure.elevation === 'number') return structure.elevation;
+    if (typeof structure.level === 'number' && structure.level > 0) return structure.level * 0.20;
+  }
+
+  // 3. Terrain heightfield datum
+  const tileType = data.land?.[y]?.[x] || 'g';
+  return getTerrainElevation(tileType);
+}
+```
+
+---
+
+### 19.6 Budget Verification & CI Invariants
+
+#### 19.6.1 Draw Call Allocation
+- Baseline infrastructure: 20 calls (`BASELINE_DRAW_CALLS`)
+- Bot pin 3D bodies: 1 call
+- Bot nameplate billboards: 1 call
+- **Total Nominal Scene**: **22 draw calls**
+
+$$\mathbf{D_{\text{total}} = 22 \le 25 \text{ (Budget Pass)}}$$
+
+Remaining headroom: $25 - 22 = 3$ calls (reserved for Fairground booths).
+
+#### 19.6.2 Centralization in `tests/perf.config.js`
+```javascript
+export const BASELINE_DRAW_CALLS = 20;
+export const PRESENCE_PINS_CALLS = 2;
+export const NOMINAL_DRAW_CALLS = BASELINE_DRAW_CALLS + PRESENCE_PINS_CALLS; // 22
+export const DRAW_CALL_LIMIT = Number.parseInt(process.env.DRAW_CALL_LIMIT ?? '25', 10);
+```
+
+#### 19.6.3 Playwright Test Suite Assertions (`tests/draw-calls.spec.js`)
+```javascript
+// Exact nominal verification with bot presence active
+expect(calls, `scene with live presence pins must equal nominal ${NOMINAL_DRAW_CALLS} draw calls`).toBe(NOMINAL_DRAW_CALLS);
+expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
+
+// Grounding verification
+const pins = window.__perf.getBotPins();
+for (const pin of pins) {
+  const expectedY = resolveGroundElevation(pin.tile[0], pin.tile[1], data, roadGrid) + 0.015;
+  expect(Math.abs(pin.position.y - expectedY)).toBeLessThan(0.03);
+}
+```
+
+---
+
+### 19.7 Actionable Subagent Execution Protocol
+
+1. **For `flash-leaf-coder` (`709f5466-d0a9-4c08-8760-384007db6f16`)**:
+   - Create `data/presence.json` conforming to Issue #244 schema.
+   - In `tests/perf.config.js`: Centralize `BASELINE_DRAW_CALLS = 20`, `PRESENCE_PINS_CALLS = 2`, and `NOMINAL_DRAW_CALLS = 22`.
+   - In `src/main.js`:
+     a. Implement procedural merged pin geometry and `THREE.InstancedMesh` for pin bodies.
+     b. Implement floating billboard text nameplates via `THREE.InstancedMesh`.
+     c. Implement `resolveGroundElevation(x, y)` for flush surface seating.
+     d. Expose `getBotPins()` on `window.__perf`.
+     e. Register bot pin instances with interactive raycasting selection.
+   - In `tests/draw-calls.spec.js`:
+     a. Assert `expect(calls).toBe(NOMINAL_DRAW_CALLS)`.
+     b. Assert `expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT)`.
+     c. Add bot pin elevation grounding tests.
+   - Verify `npm run build` and `npm run test:perf` pass 100% green.
