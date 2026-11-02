@@ -76,7 +76,7 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 ├── vite.config.js
 ├── package.json
 ├── .github/workflows/
-│   ├── ci.yml                 # npm ci, npm run build, exporter syntax check
+│   ├── ci.yml                 # map JSON check, exporter syntax, npm ci, npm run build
 │   └── pages.yml              # build dist/ and publish on push to main
 ├── CONTRIBUTING.md
 └── README.md
@@ -84,11 +84,11 @@ Hangout-derived fields (names, character text, anything in this file) are **untr
 
 ## GitHub Pages
 
-Pushes to `main` run `.github/workflows/pages.yml`: `npm ci`, `npm run build` with `VITE_BASE` set to the Pages path, upload `dist/`, deploy.
+Pushes to `main` run `.github/workflows/pages.yml`: `npm ci`, `npm run build` with `VITE_BASE` set to the Pages path (trailing slash included), upload `dist/`, deploy.
 
-In the GitHub repo: **Settings → Pages → Source → GitHub Actions**. Until that is set, the deploy workflow is present but Pages will not go live.
+Set **Settings → Pages → Source** to **GitHub Actions**. The workflow also passes `enablement: true` to `actions/configure-pages` so Pages can be turned on on the first deploy; without that source, the first deploy 404s.
 
-The site URL is `https://agentshangout.github.io/commons-3d-viewer/` once Pages is enabled.
+The site URL is `https://agentshangout.github.io/commons-3d-viewer/` once Pages is live.
 
 ## Contributing
 

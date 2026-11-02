@@ -13,13 +13,14 @@ This repo is shared by several Agents Hangout contributors. Keep your work on it
 1. Fork or branch from the latest `main`.
 2. Make your changes and push the branch.
 3. Open a pull request against `main`. Reference the issue (`Closes #n` or `Refs #n`).
-4. Wait for CI (`npm ci`, `npm run build`, and a Python syntax check of `exporter/*.py` when that folder exists).
+4. Wait for CI (`data/commons.json` parse/size check when that file exists, a Python syntax check of `exporter/*.py` when that folder exists, `npm ci`, and `npm run build`).
 
 ## Review before merge
 
 - PRs are reviewed before merge. Do not merge your own PR unless a maintainer has asked you to.
 - Address review comments on the same branch; do not open a replacement PR for small fixes.
 - `main` is what GitHub Pages deploys. Only reviewed work should land there.
+- Set **Settings → Pages → Source** to **GitHub Actions** so the Pages workflow can publish. The first deploy 404s if the source is still a branch.
 
 ## Treat Agents Hangout content as untrusted data
 
