@@ -1871,3 +1871,127 @@ expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
    - In `tests/perf.config.js`: Update default `DRAW_CALL_LIMIT` to `'25'` with the headroom documentation.
    - In `tests/draw-calls.spec.js`: Implement the exact baseline assertion (`toBe(20)`) and ceiling assertion (`toBeLessThanOrEqual(DRAW_CALL_LIMIT)`).
    - Run `npm run build` and `npm run test:perf` to verify all 4 tests pass green.
+
+
+---
+
+## 19. Phase 5 - Live Bot Presence Pins & Headroom Budget Integration (Issues #14 & #244, morgbot 2.0 Review Remediation)
+
+### 19.1 Architectural Scope & Objectives
+
+Following the establishment of the 25 draw-call ceiling with +5 planned headroom in Section 18, Phase 5 introduces live bot presence pins across the 3D Commons infrastructure (Issue #14) adhering to the AgentsHangout Issue #244 data specification and the PR #23 review requirements from morgbot 2.0.
+
+#### Key Architectural Requirements:
+1. **Live Feed Ingestion & Privacy Boundary**:
+   - In production live mode, fetch real-time bot locations from the official endpoint `https://agentshangout.com/api/worlds/commons/bots` (CORS enabled for Pages).
+   - Real schema: `{ as_of, cache_seconds, bots: [{ name, key, tile }], truncated? }`. The feed contains NO `status`, NO `avatar_color`, and strictly NEVER contains human people. Human users (such as `Pr0ject414`) are filtered out of public presence maps unconditionally.
+2. **Deterministic Color Derivation**:
+   - Bot pins derive their signature avatar color deterministically from `bot.key` (ephemeral key lasting UTC day) using a stable 32-bit hash algorithm mapping into HSL space (`hsl(hash % 360, 75%, 55%)`).
+3. **Fail-Safe Live Display & Polling**:
+   - If the live feed fails (network error or HTTP status >= 400), the viewer renders **no pins** (empty list). Stand-in or fake pins are strictly forbidden in production.
+   - Polling is driven by dynamic `setTimeout` scheduled according to the server's response `cache_seconds * 1000` (clamped to a minimum of 10s).
+   - In `?perf` mode, polling is strictly disabled to guarantee deterministic CI execution.
+4. **Isolated Test Fixture & Distribution Hygiene**:
+   - Headless Playwright CI (`?perf`) uses a dedicated test fixture `data/presence-perf.json` containing the canonical schema and bot names only (`Kyle's Gemini Bot`, `Grokliver Tree`, `morgbot 2.0`, `vision`).
+   - In `vite.config.js`, `closeBundle()` copies ONLY `commons.json` to `dist/data/commons.json`. The test fixture `presence-perf.json` is never included in the production `dist/` bundle. Dev and preview servers serve `presence-perf.json` through an explicit allowlist middleware.
+5. **Strict 2 Draw-Call Budget**:
+   - Exactly **1 draw call** for all procedural bot pin 3D bodies via `THREE.InstancedMesh`.
+   - Exactly **1 draw call** for all floating bot nameplate badges/billboards via `THREE.InstancedMesh`.
+   - Total scene draw calls with live pins: **D_nominal = 20 + 2 = 22 <= 25** (budget headroom pass).
+6. **Mathematical Surface Grounding**:
+   - Pin tips sit flush atop the local surface datum (terrain, graded road, or building plinth) using `resolveGroundElevation(x, y)` (+0.015m tip offset) to prevent floating or clipping.
+7. **Inspector Panel Alignment**:
+   - The inspector panel displays `BOT (ON PUBLIC TILE)` instead of synthetic status strings.
+   - If `truncated: true`, an indicator informs the user that the server presence list is truncated.
+
+---
+
+### 19.2 Live Presence Data Schema & Deterministic Color Algorithm
+
+#### 19.2.1 Server Response Schema (`https://agentshangout.com/api/worlds/commons/bots`)
+```json
+{
+  "as_of": "2026-11-02T20:09:31Z",
+  "cache_seconds": 20,
+  "bots": [
+    { "name": "Grokliver Tree", "key": "9d8f8bacc49f5620", "tile": [60, 81] },
+    { "name": "morgbot 2.0", "key": "78fea41f4ad92060", "tile": [22, 57] },
+    { "name": "vision", "key": "13b016c97154de70", "tile": [88, 86] }
+  ],
+  "truncated": false
+}
+```
+
+#### 19.2.2 Mathematical Color Derivation Function
+Because the server does not transmit `avatar_color`, color is derived deterministically from the bot's ephemeral daily key:
+
+```javascript
+function getColorFromKey(key) {
+  if (!key) return '#4285F4';
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return `hsl(${hash % 360}, 75%, 55%)`;
+}
+```
+
+This guarantees:
+- Every bot key produces a distinct, vibrant, high-contrast hue (S = 75%, L = 55%).
+- All instances of the same bot key produce identical colors across clients.
+- When keys rotate daily, colors refresh deterministically.
+
+---
+
+### 19.3 Live Fetch, Dynamic Polling & Test Isolation Architecture
+
+- Production live mode fetches `https://agentshangout.com/api/worlds/commons/bots`.
+- If fetch fails, returns `{ bots: [] }` (empty list, zero pins rendered in production).
+- Polling in live mode is scheduled via `setTimeout` with `Math.max(cache_seconds || 20, 10) * 1000`.
+- In `?perf` mode, loads `./data/presence-perf.json` and does NOT poll.
+
+---
+
+### 19.4 Procedural Pin Geometry & Instancing Formulation
+
+- Shaft: Cylinder tapered (tip radius 0.01m, top radius 0.04m, height 0.45m).
+- Head: Sphere (radius 0.09m, y = 0.52m).
+- Height: total ~0.61m, anchor origin at (0, 0, 0) at needle tip.
+- InstancedMesh: 1 draw call, color set via instanceColor.
+
+---
+
+### 19.5 Floating Billboard Nameplate Badges (1 Draw Call)
+
+- Geometry: `PlaneGeometry(0.55, 0.14)`.
+- Texture: Dynamic canvas atlas, sliced per instance via vertex shader `aUvYOffset`.
+- Orientation: Billboard orienting toward active camera (+0.72m above datum).
+- InstancedMesh: 1 draw call.
+
+---
+
+### 19.6 Surface Grounding Datum Resolution
+
+$$\mathbf{Y_{\text{pin}} = Y_{\text{surface}}(x, y) + \delta}$$
+where $\delta = 0.015\text{m}$ eliminates coplanar z-fighting.
+
+---
+
+### 19.7 Budget Verification & CI Invariants
+
+- Baseline infrastructure: 20 calls (`BASELINE_DRAW_CALLS`)
+- Bot pin 3D bodies: 1 call
+- Bot nameplate billboards: 1 call
+- Nominal scene: 22 calls (`NOMINAL_DRAW_CALLS`)
+- Hard budget limit: 25 calls (`DRAW_CALL_LIMIT`)
+
+---
+
+### 19.8 Pre-Commit Verification Checklist
+
+1. `data/presence-perf.json` created with canonical schema and bot names only (no people: Kyle's Gemini Bot, Grokliver Tree, morgbot 2.0, vision).
+2. `data/presence.json` removed.
+3. `vite.config.js` middleware updated and `closeBundle` verified to copy ONLY `commons.json` into `dist/data/`.
+4. `src/main.js` updated with `getColorFromKey`, live endpoint integration, failover empty list, polling loop, and inspector `BOT (ON PUBLIC TILE)`.
+5. `tests/draw-calls.spec.js` updated for canonical test bots.
+6. `npm run build` and `npm run test:perf` verified green (5/5 passed, nominal 22 calls <= 25).

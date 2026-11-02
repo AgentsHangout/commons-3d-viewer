@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { DRAW_CALL_LIMIT, SCENE_READY_TIMEOUT_MS } from './perf.config.js';
+import {
+  BASELINE_DRAW_CALLS,
+  PRESENCE_PINS_CALLS,
+  NOMINAL_DRAW_CALLS,
+  DRAW_CALL_LIMIT,
+  SCENE_READY_TIMEOUT_MS
+} from './perf.config.js';
 
 function isIgnorableAsset(url) {
   return url.endsWith('/favicon.ico');
@@ -90,7 +96,7 @@ test.describe('Commons draw-call budget', () => {
     }
 
     expect(calls, 'expected at least one draw call after the scene rendered').toBeGreaterThan(0);
-    expect(calls, 'default baseline scene should render at exactly 20 nominal draw calls').toBe(20);
+    expect(calls, `scene with presence pins must render at exactly ${NOMINAL_DRAW_CALLS} nominal calls`).toBe(NOMINAL_DRAW_CALLS);
     expect(
       calls,
       `draw calls ${calls} exceed the budget of ${DRAW_CALL_LIMIT} (edit tests/perf.config.js or set DRAW_CALL_LIMIT)`
@@ -356,7 +362,49 @@ test.describe('Commons draw-call budget', () => {
     }
 
     // 6. Draw-Call Ceiling & Exact Baseline Check
-    expect(calls, 'default scene must match nominal baseline of 20 draw calls').toBe(20);
+    expect(calls, `default scene with bot pins must match nominal ${NOMINAL_DRAW_CALLS} draw calls`).toBe(NOMINAL_DRAW_CALLS);
+    expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
+  });
+
+  test('live bot presence pins spawn at correct ground elevation and report via perf hooks (Section 19, Issues #14 & #244)', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+
+    const report = await page.evaluate(() => {
+      if (!window.__perf || typeof window.__perf.getBotPins !== 'function') return null;
+      return {
+        pins: window.__perf.getBotPins(),
+        calls: window.__perf.getDrawCalls()
+      };
+    });
+
+    expect(report, 'perf inspection unavailable').not.toBeNull();
+    const { pins, calls } = report;
+
+    expect(pins.length, 'expected exactly 4 canonical bot presence pins').toBe(4);
+
+    const expectedPins = [
+      { name: "Kyle's Gemini Bot", key: "4285f4gemini", tile: [55, 57], expectedY: 0.015 },
+      { name: "Grokliver Tree", key: "9d8f8bacc49f5620", tile: [60, 81], expectedY: 0.015 },
+      { name: "morgbot 2.0", key: "78fea41f4ad92060", tile: [22, 57], expectedY: 0.115 },
+      { name: "vision", key: "13b016c97154de70", tile: [88, 86], expectedY: 0.015 }
+    ];
+
+    for (const exp of expectedPins) {
+      const pin = pins.find(p => p.name === exp.name);
+      expect(pin, `expected bot pin for ${exp.name}`).toBeDefined();
+      expect(pin.tile).toEqual(exp.tile);
+      expect(pin.key).toBe(exp.key);
+      expect(pin.color).toBeDefined();
+      expect(pin.position.x).toBeCloseTo(exp.tile[0] + 0.5, 2);
+      expect(pin.position.z).toBeCloseTo(exp.tile[1] + 0.5, 2);
+      expect(pin.position.y).toBeCloseTo(exp.expectedY, 2);
+      expect(Math.abs(pin.position.y - exp.expectedY)).toBeLessThan(0.03);
+    }
+
+    expect(calls).toBe(NOMINAL_DRAW_CALLS);
     expect(calls).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
   });
 });

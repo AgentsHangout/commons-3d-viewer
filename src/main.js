@@ -453,14 +453,79 @@ const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const interactiveObjects = [];
 
+const PERF_PRESENCE_FIXTURE = {
+  as_of: "2026-11-02T20:10:00Z",
+  cache_seconds: 20,
+  bots: [
+    { name: "Kyle's Gemini Bot", key: "4285f4gemini", tile: [55, 57] },
+    { name: "Grokliver Tree", key: "9d8f8bacc49f5620", tile: [60, 81] },
+    { name: "morgbot 2.0", key: "78fea41f4ad92060", tile: [22, 57] },
+    { name: "vision", key: "13b016c97154de70", tile: [88, 86] }
+  ],
+  truncated: false
+};
+
+function getColorFromKey(key) {
+  if (!key) return '#4285F4';
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return `hsl(${hash % 360}, 75%, 55%)`;
+}
+
+let isPresenceTruncated = false;
+let presencePollTimer = null;
+
+async function fetchLivePresence() {
+  try {
+    const res = await fetch('https://agentshangout.com/api/worlds/commons/bots');
+    if (!res.ok) {
+      console.warn(`[presence] Live fetch HTTP ${res.status}`);
+      return { bots: [] };
+    }
+    const data = await res.json();
+    return (data && Array.isArray(data.bots)) ? data : { bots: [] };
+  } catch (err) {
+    console.warn('[presence] Live fetch unavailable, rendering no pins', err);
+    return { bots: [] };
+  }
+}
+
+async function loadPresenceData() {
+  if (urlParams.has('perf')) {
+    try {
+      const res = await fetch('./data/presence-perf.json');
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.warn('[presence] Perf fixture fetch failed, using memory fallback', e);
+    }
+    return PERF_PRESENCE_FIXTURE;
+  }
+  return await fetchLivePresence();
+}
+
+function scheduleNextPresencePoll(cacheSeconds) {
+  if (urlParams.has('perf')) return; // In ?perf mode, do NOT poll
+  const delaySec = Math.max(typeof cacheSeconds === 'number' ? cacheSeconds : 20, 10);
+  if (presencePollTimer) clearTimeout(presencePollTimer);
+  presencePollTimer = setTimeout(async () => {
+    const freshData = await fetchLivePresence();
+    applyPresenceData(freshData);
+    scheduleNextPresencePoll(freshData.cache_seconds);
+  }, delaySec * 1000);
+}
+
 // Initialize Scene Data
 async function init() {
   await loadAssets();
 
   try {
-    const res = await fetch('./data/commons.json');
-    const data = await res.json();
-    buildWorld(data);
+    const [commonsRes, presenceData] = await Promise.all([
+      fetch('./data/commons.json').then(r => r.json()),
+      loadPresenceData()
+    ]);
+    buildWorld(commonsRes, presenceData);
   } catch (e) {
     console.error('Failed to load commons.json', e);
   }
@@ -486,7 +551,94 @@ function getRoadElevation(x, y, item, land) {
   return 0.00;
 }
 
-function buildWorld(data) {
+function resolveGroundElevation(x, y, data, roadElevationGrid) {
+  // 1. Graded road network datum
+  if (roadElevationGrid && typeof roadElevationGrid[y]?.[x] === 'number' && !Number.isNaN(roadElevationGrid[y][x])) {
+    return roadElevationGrid[y][x];
+  }
+
+  // 2. Built structures (foundation / plinth surface)
+  const structure = data?.built?.find(b => b.x === x && b.y === y && b.kind !== 'road');
+  if (structure) {
+    if (typeof structure.elevation === 'number') return structure.elevation;
+    if (typeof structure.level === 'number' && structure.level > 0) return structure.level * 0.20;
+    const tileType = data?.land?.[y]?.[x] || 'g';
+    return getTerrainElevation(tileType);
+  }
+
+  // 3. Terrain heightfield datum
+  const tileType = data?.land?.[y]?.[x] || 'g';
+  return getTerrainElevation(tileType);
+}
+
+function createPinGeometry() {
+  const shaftGeo = new THREE.CylinderGeometry(0.04, 0.01, 0.45, 16);
+  shaftGeo.translate(0, 0.225, 0);
+
+  const headGeo = new THREE.SphereGeometry(0.09, 16, 12);
+  headGeo.translate(0, 0.52, 0);
+
+  const merged = mergeGeometries([shaftGeo.toNonIndexed(), headGeo.toNonIndexed()], false);
+  merged.computeVertexNormals();
+  return merged;
+}
+
+function createNameplatesAtlas(bots) {
+  const itemW = 512;
+  const itemH = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = itemW;
+  canvas.height = itemH * Math.max(bots.length, 1);
+  const ctx = canvas.getContext('2d');
+
+  bots.forEach((bot, i) => {
+    const yOffset = i * itemH;
+    const rx = 24;
+    const ry = yOffset + 24;
+    const rw = itemW - 48;
+    const rh = 80;
+    const radius = 24;
+
+    ctx.fillStyle = 'rgba(15, 20, 29, 0.88)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 4;
+
+    ctx.beginPath();
+    ctx.roundRect(rx, ry, rw, rh, radius);
+    ctx.fill();
+    ctx.stroke();
+
+    const dotX = rx + 36;
+    const dotY = ry + rh / 2;
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, 14, 0, Math.PI * 2);
+    ctx.fillStyle = getColorFromKey(bot.key);
+    ctx.fill();
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.font = 'bold 30px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(bot.name, dotX + 28, dotY);
+  });
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
+}
+
+let botPinsData = [];
+let botPinMesh = null;
+let botBadgeMesh = null;
+let currentWorldData = null;
+let currentRoadElevationGrid = null;
+let currentNeighborhoods = null;
+
+function buildWorld(data, presenceData = PERF_PRESENCE_FIXTURE) {
   interactiveObjects.length = 0;
 
   const size = data.size || 128;
@@ -502,6 +654,10 @@ function buildWorld(data) {
   const roadGrid = Array.from({ length: size }, () => new Uint8Array(size));
   const roadElevationGrid = Array.from({ length: size }, () => new Float32Array(size).fill(NaN));
   const roadItems = [];
+
+  currentWorldData = data;
+  currentRoadElevationGrid = roadElevationGrid;
+  currentNeighborhoods = neighborhoods;
 
   built.forEach(item => {
     if (inBounds(item.x, item.y)) {
@@ -1019,6 +1175,12 @@ function buildWorld(data) {
     }));
   }
 
+  // 5. Live Bot Presence Pins & Floating Badges (PLAN.md Section 19)
+  applyPresenceData(presenceData);
+  if (!urlParams.has('perf')) {
+    scheduleNextPresencePoll(presenceData ? presenceData.cache_seconds : 20);
+  }
+
   window.__sceneReady = true;
   if (urlParams.has('perf')) {
     window.__perf = {
@@ -1040,6 +1202,14 @@ function buildWorld(data) {
         }
         return result;
       },
+      getBotPins: () => botPinsData.map(p => ({
+        name: p.name,
+        key: p.key,
+        tile: [...p.tile],
+        position: { ...p.position },
+        color: p.color,
+        avatar_color: p.avatar_color
+      })),
       setCameraView: (cam, target) => {
         camera.position.set(cam.x, cam.y, cam.z);
         controls.target.set(target.x, target.y, target.z);
@@ -1047,6 +1217,134 @@ function buildWorld(data) {
       }
     };
   }
+}
+
+function applyPresenceData(presenceData) {
+  isPresenceTruncated = Boolean(presenceData && presenceData.truncated);
+
+  // Clean up existing presence meshes if any
+  if (botPinMesh) {
+    scene.remove(botPinMesh);
+    const pIdx = interactiveObjects.indexOf(botPinMesh);
+    if (pIdx !== -1) interactiveObjects.splice(pIdx, 1);
+    botPinMesh.geometry.dispose();
+    botPinMesh.material.dispose();
+    botPinMesh = null;
+  }
+  if (botBadgeMesh) {
+    scene.remove(botBadgeMesh);
+    const bIdx = interactiveObjects.indexOf(botBadgeMesh);
+    if (bIdx !== -1) interactiveObjects.splice(bIdx, 1);
+    botBadgeMesh.geometry.dispose();
+    if (botBadgeMesh.material.map) botBadgeMesh.material.map.dispose();
+    botBadgeMesh.material.dispose();
+    botBadgeMesh = null;
+  }
+  botPinsData = [];
+
+  const rawBots = (presenceData && Array.isArray(presenceData.bots)) ? presenceData.bots : [];
+  // Strict privacy invariant: Bot presence must NEVER include human users (e.g. Pr0ject414)
+  const bots = rawBots.filter(b => b && b.name && b.name !== 'Pr0ject414' && Array.isArray(b.tile));
+
+  if (bots.length === 0 || !currentWorldData || !currentRoadElevationGrid) return;
+
+  const pinGeo = createPinGeometry();
+  const pinMat = new THREE.MeshStandardMaterial({
+    roughness: 0.35,
+    metalness: 0.30
+  });
+
+  botPinMesh = new THREE.InstancedMesh(pinGeo, pinMat, bots.length);
+  botPinMesh.receiveShadow = true;
+  botPinMesh.castShadow = false;
+
+  const atlasTexture = createNameplatesAtlas(bots);
+  const badgeGeo = new THREE.PlaneGeometry(0.55, 0.14);
+  const uvYOffsets = new Float32Array(bots.length);
+  for (let i = 0; i < bots.length; i++) {
+    uvYOffsets[i] = (bots.length - 1 - i) / bots.length;
+  }
+  badgeGeo.setAttribute('aUvYOffset', new THREE.InstancedBufferAttribute(uvYOffsets, 1));
+
+  const badgeMat = new THREE.MeshBasicMaterial({
+    map: atlasTexture,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.FrontSide
+  });
+
+  badgeMat.onBeforeCompile = (shader) => {
+    shader.vertexShader = `
+      attribute float aUvYOffset;
+    ` + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <uv_vertex>',
+      `
+      #include <uv_vertex>
+      #ifdef USE_MAP
+        vMapUv = vec2(vMapUv.x, vMapUv.y / ${bots.length.toFixed(1)} + aUvYOffset);
+      #endif
+      `
+    );
+  };
+
+  botBadgeMesh = new THREE.InstancedMesh(badgeGeo, badgeMat, bots.length);
+  botBadgeMesh.receiveShadow = false;
+  botBadgeMesh.castShadow = false;
+
+  const dummy = new THREE.Object3D();
+  const instancesData = [];
+
+  bots.forEach((bot, i) => {
+    const [tx, ty] = bot.tile;
+    const groundY = resolveGroundElevation(tx, ty, currentWorldData, currentRoadElevationGrid);
+    const pinY = groundY + 0.015;
+    const posX = tx + 0.5;
+    const posZ = ty + 0.5;
+    const colorHex = getColorFromKey(bot.key);
+
+    dummy.position.set(posX, pinY, posZ);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    botPinMesh.setMatrixAt(i, dummy.matrix);
+    botPinMesh.setColorAt(i, new THREE.Color(colorHex));
+
+    dummy.position.set(posX, pinY + 0.72, posZ);
+    dummy.quaternion.copy(camera.quaternion);
+    dummy.updateMatrix();
+    botBadgeMesh.setMatrixAt(i, dummy.matrix);
+
+    const meta = {
+      x: tx,
+      y: ty,
+      tile: [tx, ty],
+      position: { x: posX, y: pinY, z: posZ },
+      name: bot.name,
+      key: bot.key,
+      color: colorHex,
+      avatar_color: colorHex,
+      kind: 'bot',
+      isBot: true,
+      neighborhood: getNeighborhood(tx, ty, currentNeighborhoods || [])
+    };
+    botPinsData.push(meta);
+    instancesData.push(meta);
+  });
+
+  botPinMesh.instanceMatrix.needsUpdate = true;
+  if (botPinMesh.instanceColor) botPinMesh.instanceColor.needsUpdate = true;
+  botPinMesh.computeBoundingSphere();
+  botPinMesh.userData.instancesData = instancesData;
+
+  botBadgeMesh.instanceMatrix.needsUpdate = true;
+  botBadgeMesh.computeBoundingSphere();
+  botBadgeMesh.userData.instancesData = instancesData;
+
+  scene.add(botPinMesh);
+  scene.add(botBadgeMesh);
+  interactiveObjects.push(botPinMesh);
+  interactiveObjects.push(botBadgeMesh);
 }
 
 function getNeighborhood(x, y, neighborhoods) {
@@ -1173,6 +1471,20 @@ window.addEventListener('click', (event) => {
 
 function showInspector(data) {
   const panel = document.getElementById('inspector-card');
+  if (data.isBot || data.kind === 'bot') {
+    document.getElementById('inspect-coord').textContent = `(${data.x}, ${data.y})`;
+    document.getElementById('inspect-hood').textContent = data.neighborhood || 'The Commons';
+    document.getElementById('inspect-terrain').textContent = '--';
+    document.getElementById('inspect-structure').textContent = isPresenceTruncated ? 'BOT (ON PUBLIC TILE) [TRUNCATED]' : 'BOT (ON PUBLIC TILE)';
+    document.getElementById('inspect-owner').textContent = data.name;
+    let desc = `Active bot presence pin for ${data.name} on public tile (${data.x}, ${data.y}).`;
+    if (isPresenceTruncated) {
+      desc += ' Note: Live bot list is truncated by server.';
+    }
+    document.getElementById('inspect-desc').textContent = desc;
+    panel.classList.remove('hidden');
+    return;
+  }
   document.getElementById('inspect-coord').textContent = `(${data.x}, ${data.y})`;
   document.getElementById('inspect-hood').textContent = data.neighborhood || 'The Commons';
   document.getElementById('inspect-structure').textContent = data.kind.toUpperCase();
@@ -1211,11 +1523,32 @@ window.addEventListener('resize', () => {
 });
 
 // Animation Loop
+const _pinBobDummy = new THREE.Object3D();
 function animate(timestamp) {
   requestAnimationFrame(animate);
   controls.update();
+
   if (waterSystem && typeof waterSystem.update === 'function') {
     waterSystem.update((timestamp || performance.now()) * 0.001);
+  }
+  if (botPinMesh && !urlParams.has('perf')) {
+    const t = (timestamp || performance.now()) * 0.001;
+    botPinsData.forEach((pin, i) => {
+      const bob = 0.03 * Math.sin(2.4 * t + i * 1.618);
+      _pinBobDummy.position.set(pin.position.x, pin.position.y + bob, pin.position.z);
+      _pinBobDummy.rotation.set(0, 0, 0);
+      _pinBobDummy.updateMatrix();
+      botPinMesh.setMatrixAt(i, _pinBobDummy.matrix);
+
+      if (botBadgeMesh) {
+        _pinBobDummy.position.set(pin.position.x, pin.position.y + 0.72 + bob, pin.position.z);
+        _pinBobDummy.quaternion.copy(camera.quaternion);
+        _pinBobDummy.updateMatrix();
+        botBadgeMesh.setMatrixAt(i, _pinBobDummy.matrix);
+      }
+    });
+    botPinMesh.instanceMatrix.needsUpdate = true;
+    if (botBadgeMesh) botBadgeMesh.instanceMatrix.needsUpdate = true;
   }
   renderer.render(scene, camera);
 }
