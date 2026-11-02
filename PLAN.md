@@ -206,15 +206,29 @@ To avoid artificial monoculture grids, pine trees (`pine_tree.glb`) are scattere
      - Tree scale: `0.140 - 0.170` (younger trees, lower canopy).
 
 ### 7.2 Strict Clearance Math
-Trees must never clip into road asphalt, concrete curbs, building walls, or water:
-1. **Built Structure & Road Buffer (`>= 1.4m`)**:
-   - For candidate world position `(posX, posZ)`:
-     Candidate must maintain Euclidean distance $\ge 1.4\text{m}$ from the center of any tile with `builtGrid[by][bx] !== null`:
-     $\sqrt{(posX - (bx + 0.5))^2 + (posZ - (by + 0.5))^2} \ge 1.40$
-   - Since tile radius to corners is $\sqrt{0.5^2 + 0.5^2} \approx 0.707\text{m}$ and pine branch radius is $1.9\text{m} \times 0.24 \approx 0.456\text{m}$, a $1.40\text{m}$ buffer strictly guarantees positive clearance:
-     $1.40\text{m} - 0.707\text{m} - 0.456\text{m} = \mathbf{0.237\text{m} \text{ (clear)}}.$
-2. **Water Shoreline Buffer (`>= 0.85m`)**:
-   - Trees must never spawn directly on water or within $0.85\text{m}$ of any water tile (`land[z][x] === 'w'`) to eliminate floating foliage along the shoreline.
+Trees must never clip into road asphalt, concrete curbs, building walls, front entrances, or water:
+1. **Built Structure & Road Edge Buffer (`>= 1.0m` to edge)**:
+   - For candidate world position `(posX, posZ)` and any built tile `[bx, bx + 1] x [by, by + 1]`:
+     ```javascript
+     const clampX = Math.max(bx, Math.min(posX, bx + 1));
+     const clampZ = Math.max(by, Math.min(posZ, by + 1));
+     const distSq = (posX - clampX) ** 2 + (posZ - clampZ) ** 2;
+     ```
+   - Enforces distance $\ge 1.0\text{m}$ to the edge of the tile. Since maximum pine branch radius is $1.9\text{m} \times 0.24 \approx 0.456\text{m}$, this strictly guarantees:
+     $$1.0\text{m} - 0.456\text{m} = \mathbf{0.544\text{m} \text{ (positive clearance from curb/wall)}}.$$
+2. **Doorway Frontage Buffer (`>= 1.5m`)**:
+   - For every building, a doorway point is established at `(hx + 0.5 + doorDirX * 0.6, hy + 0.5 + doorDirZ * 0.6)`.
+   - Candidate trees must maintain $\ge 1.5\text{m}$ Euclidean distance from all doorway points to ensure open, unobstructed sightlines and front porch access.
+3. **Water Shoreline Buffer (`>= 0.85m` to edge)**:
+   - Evaluated against clamped water tile edges, ensuring zero foliage overhanging water bodies.
+
+### 7.2.1 Order-Independent Poisson via Hash-Priority
+To eliminate cascading row-order dependencies where tile (0, 0) dictates the entire map:
+1. Candidates are generated with a deterministic spatial coordinate hash priority:
+   `priority = ((rng() * 4294967296) >>> 0)`.
+2. Candidates are sorted descending by `priority` before spatial grid evaluation.
+3. The spatial acceleration grid stores an array of candidates per cell (`treeGrid[gz][gx] = []`) to prevent overwrite errors.
+4. Hard ceiling `MAX_TREES = 5000` is enforced with `console.warn` reporting any dropped instances.
 
 ### 7.3 Organic Transforms & Grounding Elevation
 1. **Elevation Grounding**:
