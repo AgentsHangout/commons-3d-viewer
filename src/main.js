@@ -200,6 +200,16 @@ function collapseGltfToSingleMesh(gltfScene) {
 
   const merged = mergeGeometries(parts, false);
   if (!merged) return gltfScene;
+
+  // Geometric grounding: normalize model base to sit flush at Y = 0 on top of the terrain plinth
+  merged.computeBoundingBox();
+  const minY = merged.boundingBox ? merged.boundingBox.min.y : 0;
+  if (Math.abs(minY) > 0.001) {
+    merged.translate(0, -minY, 0);
+  }
+  merged.computeBoundingBox();
+  merged.computeBoundingSphere();
+
   if (!merged.attributes.normal) merged.computeVertexNormals();
 
   const avgRoughness = totalVerts > 0 ? (totalRoughness / totalVerts) : 0.75;
@@ -471,7 +481,7 @@ function buildWorld(data) {
   }
 
   // 3. Built Structures (PLAN.md Section 2, 5 & 6)
-  const SETBACK_DISTANCE = 0.12;
+  const SETBACK_DISTANCE = 0.10;
 
   // Exporter facing priority: South (y + 1), East (x + 1), West (x - 1), North (y - 1)
   const facingOrder = [
@@ -514,13 +524,22 @@ function buildWorld(data) {
       return;
     }
 
+    if (kind === 'square') {
+      boxTransforms.push({
+        x: x + 0.5, y: 0.02, z: y + 0.5, rot: 0,
+        sx: 0.98, sy: 0.04, sz: 0.98, color: 0x90a4ae, meta
+      });
+      return;
+    }
+
     // Auto-facing and setback away from adjacent road (PLAN.md Section 5)
     let hasAdjacentRoad = false;
     let roadDirX = 0;
     let roadDirZ = 0;
 
-    if (item.door_side) {
-      const d = facingOrder.find(f => f.dir === item.door_side);
+    if (typeof item.door_side === 'string') {
+      const side = item.door_side.trim().toLowerCase();
+      const d = facingOrder.find(f => f.dir === side);
       if (d) {
         hasAdjacentRoad = true;
         roadDirX = d.dx;
@@ -550,16 +569,16 @@ function buildWorld(data) {
     }
 
     if ((kind === 'house' || (x === 55 && y === 57)) && loadedModels['cabin']) {
-      glbBuildingTransforms.cabin.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.150, meta });
+      glbBuildingTransforms.cabin.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.140, meta });
     } else if ((kind === 'studio' || (x === 22 && y === 57)) && loadedModels['studio']) {
-      glbBuildingTransforms.studio.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.138, meta });
+      glbBuildingTransforms.studio.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.130, meta });
     } else if (kind === 'workshop' && loadedModels['workshop']) {
-      glbBuildingTransforms.workshop.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.155, meta });
+      glbBuildingTransforms.workshop.push({ x: posX, y: 0, z: posZ, rot: rotationY, scale: 0.145, meta });
     } else {
       const h = 0.8 + ((x * 13 + y * 7) % 6) * 0.2;
       boxTransforms.push({
         x: posX, y: h / 2, z: posZ, rot: rotationY,
-        sx: 0.72, sy: h, sz: 0.72,
+        sx: 0.65, sy: h, sz: 0.65,
         color: BUILDING_COLORS[kind] || 0x777777,
         meta
       });
