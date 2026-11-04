@@ -103,6 +103,33 @@ test.describe('Commons draw-call budget', () => {
     ).toBeLessThanOrEqual(DRAW_CALL_LIMIT);
   });
 
+  // #16: the budget covers every view the camera flies to, not only the starting one.
+  test('every fly-to view stays at or below the draw-call limit', async ({ page }) => {
+    await page.goto('/?perf');
+    await page.waitForFunction(() => window.__sceneReady === true, null, {
+      timeout: SCENE_READY_TIMEOUT_MS
+    });
+
+    for (const button of ['btn-fairground', 'btn-house', 'btn-studio', 'btn-overview']) {
+      await page.click(`#${button}`);
+      // flyTo takes 1200 ms; wait past it, then let the finished view render a few frames.
+      await page.waitForTimeout(1500);
+      const calls = await page.evaluate(
+        () =>
+          new Promise((resolve) => {
+            let n = 3;
+            const step = () => (--n <= 0 ? resolve(window.__perf.getDrawCalls()) : requestAnimationFrame(step));
+            requestAnimationFrame(step);
+          })
+      );
+      console.log(`[perf] draw calls after ${button}: ${calls} (limit ${DRAW_CALL_LIMIT})`);
+      expect(calls, `${button}: expected at least one draw call`).toBeGreaterThan(0);
+      expect(calls, `${button}: draw calls ${calls} exceed the budget of ${DRAW_CALL_LIMIT}`).toBeLessThanOrEqual(
+        DRAW_CALL_LIMIT
+      );
+    }
+  });
+
   test('tree scatter generation is deterministic across frames and builds', async ({ page }) => {
     await page.goto('/?perf');
     await page.waitForFunction(() => window.__sceneReady === true, null, {
