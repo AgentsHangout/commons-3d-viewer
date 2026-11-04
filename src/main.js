@@ -1028,7 +1028,9 @@ function buildWorld(data, presenceData = { bots: [] }) {
 
         let minSpacing, minScale, maxScale, candidateCount;
         if (forestNeighbors >= 7) {
-          // Tier 1: Deep Interior Forest (dense mature canopy, up to 2 trees per tile)
+          // Tier 1: Deep Interior Forest (dense mature canopy). Two candidates per tile, but both
+          // sit within 0.35 of the tile center, under minSpacing apart, so spacing keeps at most
+          // one: the second is a fallback for when the first is too close to a road, door or water.
           minSpacing = 1.4;
           minScale = 0.190;
           maxScale = 0.240;

@@ -195,6 +195,9 @@ To avoid artificial monoculture grids, pine trees (`pine_tree.glb`) are scattere
    - **Tier 1: Deep Interior Forest** (`forestNeighbors >= 7`):
      - Mature high-density canopy.
      - Spacing cell size: `minDist = 1.4m`.
+     - Two candidates per tile. Both fall within `0.35m` of the tile center (7.3), at most about
+       `0.99m` apart, so spacing keeps at most one tree per tile. The second candidate is a fallback
+       for when the first fails a clearance check (7.2).
      - Tree scale: `0.190 - 0.240` (large mature pines).
    - **Tier 2: Mid-Forest Grove** (`forestNeighbors >= 4 && forestNeighbors < 7`):
      - Medium-density grove.
